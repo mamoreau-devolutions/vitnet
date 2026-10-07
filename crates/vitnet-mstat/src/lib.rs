@@ -75,6 +75,53 @@ pub struct MstatSummary {
     pub peak_tracked_memory_bytes: u64,
 }
 
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct MstatDiffEntry {
+    pub identity: String,
+    pub before_bytes: u64,
+    pub after_bytes: u64,
+    pub delta_bytes: i128,
+    pub before_records: u64,
+    pub after_records: u64,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct MstatDiffSection {
+    pub name: String,
+    pub accounted: bool,
+    pub before_bytes: u64,
+    pub after_bytes: u64,
+    pub delta_bytes: i128,
+    pub added: u64,
+    pub removed: u64,
+    pub changed: u64,
+    pub entries: Vec<MstatDiffEntry>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct MstatReconciliation {
+    pub before_accounted_bytes: u64,
+    pub after_accounted_bytes: u64,
+    pub section_delta_sum: i128,
+    pub total_delta_bytes: i128,
+    pub balanced: bool,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct MstatDiff {
+    pub schema: String,
+    pub before_assembly: String,
+    pub after_assembly: String,
+    pub before_input_bytes: u64,
+    pub after_input_bytes: u64,
+    pub total_delta_bytes: i128,
+    pub sections: Vec<MstatDiffSection>,
+    pub before_deduplicated_methods: DeduplicationSummary,
+    pub after_deduplicated_methods: DeduplicationSummary,
+    pub reconciliation: MstatReconciliation,
+    pub peak_tracked_memory_bytes: u64,
+}
+
 #[derive(Debug, Error)]
 #[error("{diagnostic}")]
 pub struct MstatError {
@@ -140,6 +187,59 @@ struct DecodeDetails {
     deduplication: DeduplicationSummary,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum IdentitySource {
+    Names,
+    UserStrings,
+    Owned,
+}
+
+#[derive(Clone, Copy, Debug)]
+struct IdentityRef {
+    source: IdentitySource,
+    offset: u32,
+    length: u32,
+}
+
+#[derive(Clone, Copy, Debug)]
+struct InventoryRecord {
+    fingerprint: [u8; 16],
+    identity: IdentityRef,
+    bytes: u64,
+    records: u64,
+}
+
+struct InventorySection {
+    name: &'static str,
+    accounted: bool,
+    records: Vec<InventoryRecord>,
+}
+
+struct Inventory<'a> {
+    summary: MstatSummary,
+    names: &'a [u8],
+    user_strings: &'a [u8],
+    owned_identities: Vec<Vec<u8>>,
+    sections: Vec<InventorySection>,
+    tracked_memory_bytes: u64,
+}
+
+#[derive(Clone, Copy)]
+enum CandidateSide {
+    Before,
+    After,
+}
+
+#[derive(Clone, Copy)]
+struct DiffCandidate {
+    side: CandidateSide,
+    record: InventoryRecord,
+    before_bytes: u64,
+    after_bytes: u64,
+    before_records: u64,
+    after_records: u64,
+}
+
 /// Maps and summarizes an MSTAT file without copying its contents.
 ///
 /// # Errors
@@ -158,6 +258,62 @@ pub fn summarize_path(path: &Path, memory_limit: u64) -> Result<MstatSummary, Ms
         error.diagnostic.input_path = Some(path.to_owned());
         error
     })
+}
+
+/// Memory-maps and structurally compares two MSTAT 2.2 files.
+///
+/// # Errors
+///
+/// Returns a typed I/O, malformed-input, or resource-limit diagnostic.
+pub fn diff_paths(
+    before: &Path,
+    after: &Path,
+    memory_limit: u64,
+    top: usize,
+) -> Result<MstatDiff, MstatError> {
+    let before_data = mmap_guard::map_file(before).map_err(|error| {
+        let mut diagnostic = Diagnostic::malformed("mstat.io", error.to_string());
+        diagnostic.input_path = Some(before.to_owned());
+        MstatError {
+            diagnostic: Box::new(diagnostic),
+        }
+    })?;
+    if before == after {
+        return diff(&before_data, &before_data, memory_limit, top).map_err(|mut error| {
+            error.diagnostic.input_path = Some(before.to_owned());
+            error
+        });
+    }
+    let after_data = mmap_guard::map_file(after).map_err(|error| {
+        let mut diagnostic = Diagnostic::malformed("mstat.io", error.to_string());
+        diagnostic.input_path = Some(after.to_owned());
+        MstatError {
+            diagnostic: Box::new(diagnostic),
+        }
+    })?;
+    diff(&before_data, &after_data, memory_limit, top)
+}
+
+/// Structurally compares two in-memory MSTAT 2.2 images.
+///
+/// # Errors
+///
+/// Returns a typed malformed-input or resource-limit diagnostic.
+pub fn diff(
+    before: &[u8],
+    after: &[u8],
+    memory_limit: u64,
+    top: usize,
+) -> Result<MstatDiff, MstatError> {
+    ResourceBudget::new(memory_limit, 0, 1, None)
+        .check(MIN_TRACKED_MEMORY, 0)
+        .map_err(|error| resource_error(error.to_string()))?;
+    let per_input_limit = memory_limit.saturating_sub(MIN_TRACKED_MEMORY) / 2;
+    let mut before_inventory = Inventory::parse(before, per_input_limit)?;
+    let mut after_inventory = Inventory::parse(after, per_input_limit)?;
+    before_inventory.sort_and_coalesce()?;
+    after_inventory.sort_and_coalesce()?;
+    diff_inventories(&before_inventory, &after_inventory, memory_limit, top)
 }
 
 /// Summarizes an in-memory MSTAT image. This entry point supports independently
@@ -269,6 +425,633 @@ pub fn summarize(bytes: &[u8], memory_limit: u64) -> Result<MstatSummary, MstatE
         deduplicated_methods: details.deduplication,
         peak_tracked_memory_bytes: MIN_TRACKED_MEMORY,
     })
+}
+
+impl<'a> Inventory<'a> {
+    fn parse(bytes: &'a [u8], memory_limit: u64) -> Result<Self, MstatError> {
+        let summary = summarize(bytes, memory_limit.max(MIN_TRACKED_MEMORY))?;
+        let expected_records = summary
+            .categories
+            .iter()
+            .try_fold(0_u64, |total, category| {
+                total.checked_add(if category.name == "DeduplicatedMethods" {
+                    category.items
+                } else {
+                    category.records
+                })
+            })
+            .ok_or_else(|| malformed("mstat.diff.records", "record count overflow", None))?;
+        let required = expected_records
+            .checked_mul(size_of::<InventoryRecord>() as u64)
+            .ok_or_else(|| malformed("mstat.diff.memory", "inventory size overflow", None))?;
+        if required > memory_limit {
+            return Err(resource_error(format!(
+                "MSTAT diff inventory requires at least {required} bytes per input; limit provides {memory_limit}"
+            )));
+        }
+
+        let image = PeImage::parse(bytes)?;
+        let metadata = image.rva_slice(image.metadata_rva, image.metadata_size)?;
+        let (tables_stream, strings_stream, user_strings_stream) = metadata_streams(metadata)?;
+        let tables = Tables::parse(
+            checked_slice(metadata, tables_stream.offset, tables_stream.size)?,
+            checked_slice(metadata, strings_stream.offset, strings_stream.size)?,
+        )?;
+        let user_strings = checked_slice(
+            metadata,
+            user_strings_stream.offset,
+            user_strings_stream.size,
+        )?;
+        let names_section = image
+            .sections
+            .iter()
+            .find(|section| section.name == b".names")
+            .ok_or_else(|| malformed("mstat.section.names", "missing .names section", None))?;
+        let names = image.section_logical_slice(names_section)?;
+
+        let mut inventory = Self {
+            summary,
+            names,
+            user_strings,
+            owned_identities: Vec::new(),
+            sections: REQUIRED_STREAMS
+                .iter()
+                .enumerate()
+                .map(|(index, name)| InventorySection {
+                    name,
+                    accounted: index < 3,
+                    records: Vec::new(),
+                })
+                .collect(),
+            tracked_memory_bytes: required,
+        };
+        for (section, category) in inventory
+            .sections
+            .iter_mut()
+            .zip(&inventory.summary.categories)
+        {
+            let count = if category.name == "DeduplicatedMethods" {
+                category.items
+            } else {
+                category.records
+            };
+            section
+                .records
+                .try_reserve_exact(usize::try_from(count).map_err(|_| {
+                    resource_error("MSTAT diff record count exceeds addressable memory")
+                })?)
+                .map_err(|error| {
+                    resource_error(format!("unable to reserve MSTAT diff inventory: {error}"))
+                })?;
+        }
+
+        for row in tables.methods()? {
+            let name = tables.string(row.name)?;
+            let Some(index) = REQUIRED_STREAMS
+                .iter()
+                .position(|candidate| *candidate == name)
+            else {
+                continue;
+            };
+            let body = image.method_body(row.rva)?;
+            decode_inventory_category(
+                name,
+                body,
+                &tables,
+                names,
+                user_strings,
+                &mut inventory.sections[index].records,
+                &mut inventory.owned_identities,
+            )?;
+        }
+        Ok(inventory)
+    }
+
+    fn sort_and_coalesce(&mut self) -> Result<(), MstatError> {
+        let names = self.names;
+        let user_strings = self.user_strings;
+        let owned = &self.owned_identities;
+        for section in &mut self.sections {
+            section.records.sort_unstable_by(|left, right| {
+                compare_records(names, user_strings, owned, left, right)
+            });
+            let mut write = 0;
+            for read in 0..section.records.len() {
+                if write > 0
+                    && compare_records(
+                        names,
+                        user_strings,
+                        owned,
+                        &section.records[write - 1],
+                        &section.records[read],
+                    )
+                    .is_eq()
+                {
+                    section.records[write - 1].bytes = section.records[write - 1]
+                        .bytes
+                        .checked_add(section.records[read].bytes)
+                        .ok_or_else(|| {
+                            malformed("mstat.diff.size", "identity size overflow", None)
+                        })?;
+                    section.records[write - 1].records = section.records[write - 1]
+                        .records
+                        .checked_add(section.records[read].records)
+                        .ok_or_else(|| {
+                            malformed("mstat.diff.records", "identity count overflow", None)
+                        })?;
+                } else {
+                    section.records[write] = section.records[read];
+                    write += 1;
+                }
+            }
+            section.records.truncate(write);
+        }
+        Ok(())
+    }
+
+    fn identity_bytes(&self, identity: IdentityRef) -> &[u8] {
+        identity_bytes(
+            self.names,
+            self.user_strings,
+            &self.owned_identities,
+            identity,
+        )
+    }
+
+    fn identity_display(&self, identity: IdentityRef) -> String {
+        let bytes = self.identity_bytes(identity);
+        let value = match identity.source {
+            IdentitySource::UserStrings => {
+                let utf16 = bytes
+                    .chunks_exact(2)
+                    .map(|chunk| u16::from_le_bytes([chunk[0], chunk[1]]));
+                char::decode_utf16(utf16)
+                    .map(|scalar| scalar.unwrap_or(char::REPLACEMENT_CHARACTER))
+                    .collect::<String>()
+            }
+            IdentitySource::Names | IdentitySource::Owned => {
+                String::from_utf8_lossy(bytes).into_owned()
+            }
+        };
+        truncate_identity(value, 256)
+    }
+}
+
+fn decode_inventory_category(
+    name: &str,
+    body: MethodBody<'_>,
+    tables: &Tables<'_>,
+    names: &[u8],
+    user_strings: &[u8],
+    records: &mut Vec<InventoryRecord>,
+    owned: &mut Vec<Vec<u8>>,
+) -> Result<(), MstatError> {
+    let mut decoder = IlDecoder::new(body.code, body.file_offset);
+    while !decoder.is_empty() {
+        match name {
+            "Methods" => {
+                tables.validate_token(decoder.token()?, EntityKind::Method)?;
+                let body_size = decoder.size()?;
+                let gc_size = decoder.size()?;
+                let eh_size = decoder.size()?;
+                let size = body_size
+                    .checked_add(gc_size)
+                    .and_then(|value| value.checked_add(eh_size))
+                    .ok_or_else(|| malformed("mstat.diff.size", "method size overflow", None))?;
+                let identity = name_identity(names, &mut decoder)?;
+                records.push(inventory_record(identity, size, names, user_strings, owned));
+            }
+            "Types" => {
+                tables.validate_token(decoder.token()?, EntityKind::Type)?;
+                let size = decoder.size()?;
+                let identity = name_identity(names, &mut decoder)?;
+                records.push(inventory_record(identity, size, names, user_strings, owned));
+            }
+            "Blobs" => {
+                let identity = user_string_identity(user_strings, decoder.string_token()?)?;
+                let size = decoder.size()?;
+                records.push(inventory_record(identity, size, names, user_strings, owned));
+            }
+            "RvaFields" => {
+                tables.validate_token(decoder.token()?, EntityKind::Field)?;
+                let size = decoder.size()?;
+                let identity = name_identity(names, &mut decoder)?;
+                records.push(inventory_record(identity, size, names, user_strings, owned));
+            }
+            "FrozenObjects" => {
+                tables.validate_token(decoder.token()?, EntityKind::Type)?;
+                let size = decoder.size()?;
+                let identity = name_identity(names, &mut decoder)?;
+                if decoder.peek()? == 0xd0 {
+                    tables.validate_token(decoder.token()?, EntityKind::Type)?;
+                } else if decoder.i4()? != 0 {
+                    return Err(decoder.error(
+                        "mstat.il.frozen_owner",
+                        "frozen-object owner must be ldtoken or zero",
+                    ));
+                }
+                records.push(inventory_record(identity, size, names, user_strings, owned));
+            }
+            "ManifestResources" => {
+                let token = u32::try_from(decoder.i4()?).map_err(|_| {
+                    decoder.error(
+                        "mstat.token",
+                        "manifest-resource assembly token is negative",
+                    )
+                })?;
+                tables.validate_token(token, EntityKind::AssemblyRef)?;
+                let resource = user_string_identity(user_strings, decoder.string_token()?)?;
+                let size = decoder.size()?;
+                let mut identity = tables.assembly_ref_identity(token)?.into_bytes();
+                identity.push(0);
+                identity.extend_from_slice(identity_bytes(names, user_strings, owned, resource));
+                let owned_index = owned.len();
+                owned.push(identity);
+                let identity = IdentityRef {
+                    source: IdentitySource::Owned,
+                    offset: u32::try_from(owned_index)
+                        .map_err(|_| resource_error("too many owned MSTAT diff identities"))?,
+                    length: 0,
+                };
+                records.push(inventory_record(identity, size, names, user_strings, owned));
+            }
+            "DeduplicatedMethods" => {
+                tables.validate_token(decoder.token()?, EntityKind::Method)?;
+                let count = decoder.size()?;
+                if count > decoder.remaining_len() as u64 / 6 {
+                    return Err(decoder.error(
+                        "mstat.il.deduplicated",
+                        "deduplicated-method count exceeds remaining method body",
+                    ));
+                }
+                for _ in 0..count {
+                    tables.validate_token(decoder.token()?, EntityKind::Method)?;
+                    let identity = name_identity(names, &mut decoder)?;
+                    records.push(inventory_record(identity, 0, names, user_strings, owned));
+                }
+            }
+            _ => unreachable!("caller only passes required stream names"),
+        }
+    }
+    Ok(())
+}
+
+fn name_identity(names: &[u8], decoder: &mut IlDecoder<'_>) -> Result<IdentityRef, MstatError> {
+    let offset = decoder.mangled_name_offset(names.len() as u64)?;
+    let (value_offset, length) = ser_string_range(names, offset)?;
+    Ok(IdentityRef {
+        source: IdentitySource::Names,
+        offset: u32::try_from(value_offset)
+            .map_err(|_| resource_error("MSTAT name offset exceeds u32"))?,
+        length: u32::try_from(length)
+            .map_err(|_| resource_error("MSTAT name length exceeds u32"))?,
+    })
+}
+
+fn user_string_identity(bytes: &[u8], token: u32) -> Result<IdentityRef, MstatError> {
+    let (value_offset, length) = user_string_range(bytes, token)?;
+    Ok(IdentityRef {
+        source: IdentitySource::UserStrings,
+        offset: u32::try_from(value_offset)
+            .map_err(|_| resource_error("MSTAT user-string offset exceeds u32"))?,
+        length: u32::try_from(length)
+            .map_err(|_| resource_error("MSTAT user-string length exceeds u32"))?,
+    })
+}
+
+fn inventory_record(
+    identity: IdentityRef,
+    bytes: u64,
+    names: &[u8],
+    user_strings: &[u8],
+    owned: &[Vec<u8>],
+) -> InventoryRecord {
+    let hash = blake3::hash(identity_bytes(names, user_strings, owned, identity));
+    let mut fingerprint = [0_u8; 16];
+    fingerprint.copy_from_slice(&hash.as_bytes()[..16]);
+    InventoryRecord {
+        fingerprint,
+        identity,
+        bytes,
+        records: 1,
+    }
+}
+
+fn identity_bytes<'a>(
+    names: &'a [u8],
+    user_strings: &'a [u8],
+    owned: &'a [Vec<u8>],
+    identity: IdentityRef,
+) -> &'a [u8] {
+    match identity.source {
+        IdentitySource::Names => {
+            let start = identity.offset as usize;
+            &names[start..start + identity.length as usize]
+        }
+        IdentitySource::UserStrings => {
+            let start = identity.offset as usize;
+            &user_strings[start..start + identity.length as usize]
+        }
+        IdentitySource::Owned => &owned[identity.offset as usize],
+    }
+}
+
+fn compare_records(
+    names: &[u8],
+    user_strings: &[u8],
+    owned: &[Vec<u8>],
+    left: &InventoryRecord,
+    right: &InventoryRecord,
+) -> std::cmp::Ordering {
+    left.fingerprint.cmp(&right.fingerprint).then_with(|| {
+        identity_bytes(names, user_strings, owned, left.identity).cmp(identity_bytes(
+            names,
+            user_strings,
+            owned,
+            right.identity,
+        ))
+    })
+}
+
+fn compare_cross(
+    before: &Inventory<'_>,
+    left: &InventoryRecord,
+    after: &Inventory<'_>,
+    right: &InventoryRecord,
+) -> std::cmp::Ordering {
+    left.fingerprint.cmp(&right.fingerprint).then_with(|| {
+        before
+            .identity_bytes(left.identity)
+            .cmp(after.identity_bytes(right.identity))
+    })
+}
+
+fn diff_inventories(
+    before: &Inventory<'_>,
+    after: &Inventory<'_>,
+    memory_limit: u64,
+    top: usize,
+) -> Result<MstatDiff, MstatError> {
+    let tracked = inventory_tracked_bytes(before)
+        .checked_add(inventory_tracked_bytes(after))
+        .ok_or_else(|| malformed("mstat.diff.memory", "tracked-memory overflow", None))?;
+    if tracked > memory_limit {
+        return Err(resource_error(format!(
+            "MSTAT diff state requires {tracked} bytes, exceeding the {memory_limit}-byte limit"
+        )));
+    }
+
+    let mut sections = Vec::with_capacity(REQUIRED_STREAMS.len());
+    for index in 0..REQUIRED_STREAMS.len() {
+        sections.push(diff_section(
+            before,
+            &before.sections[index],
+            after,
+            &after.sections[index],
+            top,
+        )?);
+    }
+    let section_delta_sum = sections
+        .iter()
+        .filter(|section| section.accounted)
+        .map(|section| section.delta_bytes)
+        .sum::<i128>();
+    let total_delta_bytes = i128::from(after.summary.accounted_size_bytes)
+        - i128::from(before.summary.accounted_size_bytes);
+    let reconciliation = MstatReconciliation {
+        before_accounted_bytes: before.summary.accounted_size_bytes,
+        after_accounted_bytes: after.summary.accounted_size_bytes,
+        section_delta_sum,
+        total_delta_bytes,
+        balanced: section_delta_sum == total_delta_bytes,
+    };
+    if !reconciliation.balanced {
+        return Err(malformed(
+            "mstat.diff.reconciliation",
+            "accounted section deltas do not reconcile to the overall delta",
+            None,
+        ));
+    }
+    Ok(MstatDiff {
+        schema: "vitnet.mstat-diff.v1".into(),
+        before_assembly: before.summary.assembly.clone(),
+        after_assembly: after.summary.assembly.clone(),
+        before_input_bytes: before.summary.input_bytes,
+        after_input_bytes: after.summary.input_bytes,
+        total_delta_bytes,
+        sections,
+        before_deduplicated_methods: before.summary.deduplicated_methods.clone(),
+        after_deduplicated_methods: after.summary.deduplicated_methods.clone(),
+        reconciliation,
+        peak_tracked_memory_bytes: tracked,
+    })
+}
+
+#[allow(clippy::too_many_lines)]
+fn diff_section(
+    before: &Inventory<'_>,
+    before_section: &InventorySection,
+    after: &Inventory<'_>,
+    after_section: &InventorySection,
+    top: usize,
+) -> Result<MstatDiffSection, MstatError> {
+    let before_bytes = sum_record_bytes(&before_section.records)?;
+    let after_bytes = sum_record_bytes(&after_section.records)?;
+    let mut left = 0;
+    let mut right = 0;
+    let mut added = 0_u64;
+    let mut removed = 0_u64;
+    let mut changed = 0_u64;
+    let mut candidates = Vec::<DiffCandidate>::with_capacity(top.min(1024));
+    while left < before_section.records.len() || right < after_section.records.len() {
+        let ordering = match (
+            before_section.records.get(left),
+            after_section.records.get(right),
+        ) {
+            (Some(before_record), Some(after_record)) => {
+                compare_cross(before, before_record, after, after_record)
+            }
+            (Some(_), None) => std::cmp::Ordering::Less,
+            (None, Some(_)) => std::cmp::Ordering::Greater,
+            (None, None) => break,
+        };
+        match ordering {
+            std::cmp::Ordering::Less => {
+                let record = before_section.records[left];
+                removed = removed.saturating_add(1);
+                consider_candidate(
+                    &mut candidates,
+                    DiffCandidate {
+                        side: CandidateSide::Before,
+                        record,
+                        before_bytes: record.bytes,
+                        after_bytes: 0,
+                        before_records: record.records,
+                        after_records: 0,
+                    },
+                    top,
+                    before,
+                    after,
+                );
+                left += 1;
+            }
+            std::cmp::Ordering::Greater => {
+                let record = after_section.records[right];
+                added = added.saturating_add(1);
+                consider_candidate(
+                    &mut candidates,
+                    DiffCandidate {
+                        side: CandidateSide::After,
+                        record,
+                        before_bytes: 0,
+                        after_bytes: record.bytes,
+                        before_records: 0,
+                        after_records: record.records,
+                    },
+                    top,
+                    before,
+                    after,
+                );
+                right += 1;
+            }
+            std::cmp::Ordering::Equal => {
+                let before_record = before_section.records[left];
+                let after_record = after_section.records[right];
+                if before_record.bytes != after_record.bytes
+                    || before_record.records != after_record.records
+                {
+                    changed = changed.saturating_add(1);
+                    consider_candidate(
+                        &mut candidates,
+                        DiffCandidate {
+                            side: CandidateSide::After,
+                            record: after_record,
+                            before_bytes: before_record.bytes,
+                            after_bytes: after_record.bytes,
+                            before_records: before_record.records,
+                            after_records: after_record.records,
+                        },
+                        top,
+                        before,
+                        after,
+                    );
+                }
+                left += 1;
+                right += 1;
+            }
+        }
+    }
+    candidates.sort_by(|left, right| compare_candidates(left, right, before, after));
+    let entries = candidates
+        .into_iter()
+        .map(|candidate| {
+            let inventory = match candidate.side {
+                CandidateSide::Before => before,
+                CandidateSide::After => after,
+            };
+            MstatDiffEntry {
+                identity: inventory.identity_display(candidate.record.identity),
+                before_bytes: candidate.before_bytes,
+                after_bytes: candidate.after_bytes,
+                delta_bytes: i128::from(candidate.after_bytes) - i128::from(candidate.before_bytes),
+                before_records: candidate.before_records,
+                after_records: candidate.after_records,
+            }
+        })
+        .collect();
+    Ok(MstatDiffSection {
+        name: before_section.name.into(),
+        accounted: before_section.accounted,
+        before_bytes,
+        after_bytes,
+        delta_bytes: i128::from(after_bytes) - i128::from(before_bytes),
+        added,
+        removed,
+        changed,
+        entries,
+    })
+}
+
+fn consider_candidate(
+    candidates: &mut Vec<DiffCandidate>,
+    candidate: DiffCandidate,
+    top: usize,
+    before: &Inventory<'_>,
+    after: &Inventory<'_>,
+) {
+    if top == 0 {
+        return;
+    }
+    candidates.push(candidate);
+    candidates.sort_by(|left, right| compare_candidates(left, right, before, after));
+    candidates.truncate(top);
+}
+
+fn compare_candidates(
+    left: &DiffCandidate,
+    right: &DiffCandidate,
+    before: &Inventory<'_>,
+    after: &Inventory<'_>,
+) -> std::cmp::Ordering {
+    let left_delta = i128::from(left.after_bytes) - i128::from(left.before_bytes);
+    let right_delta = i128::from(right.after_bytes) - i128::from(right.before_bytes);
+    right_delta
+        .unsigned_abs()
+        .cmp(&left_delta.unsigned_abs())
+        .then_with(|| right_delta.cmp(&left_delta))
+        .then_with(|| {
+            candidate_identity(left, before, after).cmp(candidate_identity(right, before, after))
+        })
+}
+
+fn candidate_identity<'a>(
+    candidate: &DiffCandidate,
+    before: &'a Inventory<'_>,
+    after: &'a Inventory<'_>,
+) -> &'a [u8] {
+    match candidate.side {
+        CandidateSide::Before => before.identity_bytes(candidate.record.identity),
+        CandidateSide::After => after.identity_bytes(candidate.record.identity),
+    }
+}
+
+fn sum_record_bytes(records: &[InventoryRecord]) -> Result<u64, MstatError> {
+    records.iter().try_fold(0_u64, |total, record| {
+        total
+            .checked_add(record.bytes)
+            .ok_or_else(|| malformed("mstat.diff.size", "section size overflow", None))
+    })
+}
+
+fn inventory_tracked_bytes(inventory: &Inventory<'_>) -> u64 {
+    let records = inventory
+        .sections
+        .iter()
+        .map(|section| {
+            (section.records.capacity() as u64).saturating_mul(size_of::<InventoryRecord>() as u64)
+        })
+        .sum::<u64>();
+    let owned = inventory
+        .owned_identities
+        .iter()
+        .map(|value| value.capacity() as u64)
+        .sum::<u64>();
+    records
+        .saturating_add(owned)
+        .saturating_add(inventory.tracked_memory_bytes.min(MIN_TRACKED_MEMORY))
+}
+
+fn truncate_identity(mut value: String, limit: usize) -> String {
+    if value.len() <= limit {
+        return value;
+    }
+    let mut end = limit;
+    while !value.is_char_boundary(end) {
+        end -= 1;
+    }
+    value.truncate(end);
+    value.push('…');
+    value
 }
 
 impl<'a> PeImage<'a> {
@@ -701,8 +1484,10 @@ impl<'a> Tables<'a> {
             26 => string,
             28 => 2 + coded(&[4, 6], 1) + string + table_index(26),
             30 => 8,
-            31 => 4,
+            31 | 33 => 4,
             32 => 16 + blob + string * 2,
+            34 => 12,
+            35 => 12 + blob * 2 + string * 2,
             _ if self.rows[table] == 0 => 0,
             _ => {
                 return Err(malformed(
@@ -760,6 +1545,32 @@ impl<'a> Tables<'a> {
             ));
         }
         Ok(())
+    }
+
+    fn assembly_ref_identity(&self, token: u32) -> Result<String, MstatError> {
+        self.validate_token(token, EntityKind::AssemblyRef)?;
+        let row_index = usize::try_from((token & TOKEN_RID_MASK) - 1)
+            .map_err(|_| malformed("mstat.token.rid", "assembly row exceeds usize", None))?;
+        let row_size = self.row_size(35)?;
+        let offset = self
+            .table_offset(35)?
+            .checked_add(row_index.checked_mul(row_size).ok_or_else(|| {
+                malformed("mstat.table.offset", "assembly row offset overflow", None)
+            })?)
+            .ok_or_else(|| malformed("mstat.table.offset", "assembly row offset overflow", None))?;
+        let row = checked_slice(self.bytes, offset, row_size)?;
+        let name_offset = 12 + self.blob_width;
+        let name = self.string(read_index(row, name_offset, self.string_width)?)?;
+        let culture = self.string(read_index(
+            row,
+            name_offset + self.string_width,
+            self.string_width,
+        )?)?;
+        Ok(if culture.is_empty() {
+            name.to_owned()
+        } else {
+            format!("{name}, Culture={culture}")
+        })
     }
 }
 
@@ -1206,6 +2017,10 @@ fn checked_add(left: u64, right: u64) -> Result<u64, MstatError> {
 }
 
 fn validate_ser_string(bytes: &[u8], offset: u64) -> Result<(), MstatError> {
+    ser_string_range(bytes, offset).map(|_| ())
+}
+
+fn ser_string_range(bytes: &[u8], offset: u64) -> Result<(usize, usize), MstatError> {
     let offset = usize::try_from(offset)
         .map_err(|_| malformed("mstat.names.offset", "name offset exceeds usize", None))?;
     let (length, prefix) = compressed_unsigned(bytes, offset, "mstat.names")?;
@@ -1215,10 +2030,14 @@ fn validate_ser_string(bytes: &[u8], offset: u64) -> Result<(), MstatError> {
     let value = checked_slice(bytes, value_offset, length)?;
     std::str::from_utf8(value)
         .map_err(|_| malformed("mstat.names.utf8", "mangled name is not valid UTF-8", None))?;
-    Ok(())
+    Ok((value_offset, length))
 }
 
 fn validate_user_string(bytes: &[u8], token: u32) -> Result<(), MstatError> {
+    user_string_range(bytes, token).map(|_| ())
+}
+
+fn user_string_range(bytes: &[u8], token: u32) -> Result<(usize, usize), MstatError> {
     if token & !TOKEN_RID_MASK != USER_STRING_TOKEN {
         return Err(malformed(
             "mstat.user_string.token",
@@ -1257,7 +2076,7 @@ fn validate_user_string(bytes: &[u8], token: u32) -> Result<(), MstatError> {
             Some(value_offset as u64),
         ));
     }
-    Ok(())
+    Ok((value_offset, length - 1))
 }
 
 fn compressed_unsigned(
@@ -1322,5 +2141,40 @@ fn malformed(
 fn resource_error(message: impl Into<String>) -> MstatError {
     MstatError {
         diagnostic: Box::new(Diagnostic::malformed("resource.memory_limit", message)),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn fingerprint_collision_falls_back_to_exact_identity_bytes() {
+        let names = b"alphaomega";
+        let fingerprint = [7_u8; 16];
+        let alpha = InventoryRecord {
+            fingerprint,
+            identity: IdentityRef {
+                source: IdentitySource::Names,
+                offset: 0,
+                length: 5,
+            },
+            bytes: 1,
+            records: 1,
+        };
+        let omega = InventoryRecord {
+            fingerprint,
+            identity: IdentityRef {
+                source: IdentitySource::Names,
+                offset: 5,
+                length: 5,
+            },
+            bytes: 1,
+            records: 1,
+        };
+        assert_eq!(
+            compare_records(names, &[], &[], &alpha, &omega),
+            std::cmp::Ordering::Less
+        );
     }
 }

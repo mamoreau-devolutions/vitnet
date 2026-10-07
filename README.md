@@ -73,6 +73,18 @@ methods. `accounted_size_bytes` avoids double-counting the specialized streams
 that MSTAT 2.x also includes in `Blobs`. See
 [`docs/formats/mstat.md`](docs/formats/mstat.md).
 
+Compare two MSTAT 2.2 files by stable producer identity rather than metadata
+row number:
+
+```console
+vitnet --format json --output mstat-diff.json mstat diff before.mstat after.mstat --top 50
+```
+
+The `vitnet.mstat-diff.v1` report lists additions, removals, and retained
+identity size changes for every accounted stream and specialized breakdown.
+Its reconciliation object makes the signed accounted delta independently
+checkable. Only bounded top changes are converted to display strings.
+
 ## DGML statistics
 
 Process a NativeAOT scan or codegen graph without building a DOM or retaining
@@ -136,9 +148,9 @@ Fuzz targets for metadata, MSTAT, and DGML parser boundaries are under `fuzz/`
 and can be run with `cargo fuzz run metadata_decoder`, `mstat_summary`, or
 `dgml_stats` after installing `cargo-fuzz`.
 
-`vitnet mstat diff` and DGML index/search/why expose stable placeholders and
-return typed unsupported-input diagnostics. They require the structural MSTAT
-identity and immutable external-memory DGML index phases in the roadmap.
+DGML index/search/why expose stable placeholders and return typed
+unsupported-input diagnostics. They require the immutable external-memory
+DGML index phases in the roadmap.
 
 See [`docs/vitnet-build-plan.md`](docs/vitnet-build-plan.md) for the phased
 roadmap and [`docs/format-provenance.md`](docs/format-provenance.md) for the

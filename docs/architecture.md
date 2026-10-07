@@ -95,3 +95,19 @@ Each of the seven MSTAT 2.2 streams is decoded with an exact opcode state
 machine and aggregated immediately. Accounted totals use the compatibility
 `Methods + Types + Blobs` view; the specialized RVA-field, frozen-object, and
 resource streams are exposed as breakdowns without double-counting them.
+
+## MSTAT structural diff path
+
+Diff mode maps both inputs read-only and performs the same checked MSTAT 2.2
+parse. When both arguments name the same path, one mapping is reused. Each
+record-scale inventory entry contains only a 128-bit BLAKE3 fingerprint, a
+borrowed identity range, checked byte and record totals, and compact source
+metadata. Resource identities are the only synthesized values and combine
+assembly name/culture with the exact resource name.
+
+Inventories are sorted by fingerprint and complete identity bytes, then
+duplicate identities are coalesced and merged linearly. Exact bytes are always
+compared after a fingerprint match, including collision cases. Top-N output is
+bounded and deterministic by absolute delta, signed delta, then identity.
+Only selected display identities are allocated. Accounted section deltas are
+checked against the overall signed delta before a report is returned.

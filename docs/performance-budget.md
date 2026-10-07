@@ -59,6 +59,27 @@ pages and file-cache behavior are represented by process working set rather
 than `peak_tracked_memory_bytes`. This result is below the 1 GiB / 15 second
 MSTAT summary acceptance budget.
 
+## MSTAT structural diff
+
+The 910,090,240-byte local MSTAT corpus was compared with itself by a release
+build using `--memory-limit 2GiB --top 50`:
+
+| Metric | Result |
+| --- | ---: |
+| Wall time | 4.919 s |
+| Peak sampled working set | 1,202.98 MiB |
+| Conservative tracked inventory state | 425,396,246 B |
+| Total / reconciled delta | 0 B / balanced |
+| Added / removed / changed identities | 0 / 0 / 0 |
+| Temporary disk | 0 B |
+| Output | `vitnet.mstat-diff.v1` |
+
+The identical-path case reuses one read-only mapping while independently
+building and comparing both inventories. This exercises full parsing,
+fingerprinting, sorting, exact identity comparison, section reconciliation,
+and serialization. The result is below the plan's 2 GiB / 60 second MSTAT
+diff budget. The local input and generated report are not repository fixtures.
+
 ## DGML statistics
 
 Both private/local RDM graphs were processed by a release build with

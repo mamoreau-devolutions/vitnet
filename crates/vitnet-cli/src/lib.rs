@@ -11,7 +11,7 @@ use vitnet_metadata::{
     Aggregate, AnalysisOptions, MetadataError, StreamingDecoder,
     analyze_stream_with_aggregate_limit,
 };
-use vitnet_mstat::{MstatError, MstatSummary, summarize_path};
+use vitnet_mstat::{MstatDiff, MstatError, MstatSummary, diff_paths, summarize_path};
 use vitnet_report::{InputDescriptor, MetadataComparisonEnvelope, MetadataEnvelope};
 
 const DEFAULT_MEMORY_LIMIT: u64 = 2 * 1024 * 1024 * 1024;
@@ -81,8 +81,15 @@ pub struct PlaceholderCommand<T: Subcommand> {
 
 #[derive(Clone, Debug, Subcommand)]
 pub enum MstatCommand {
-    Summary { input: PathBuf },
-    Diff { before: PathBuf, after: PathBuf },
+    Summary {
+        input: PathBuf,
+    },
+    Diff {
+        before: PathBuf,
+        after: PathBuf,
+        #[arg(long, value_parser = parse_positive_usize, default_value_t = 50)]
+        top: usize,
+    },
 }
 
 #[derive(Clone, Debug, Subcommand)]
@@ -271,7 +278,18 @@ fn execute_mstat(cli: &Cli, command: &MstatCommand) -> Result<String, AppError> 
             })?;
             render_mstat_summary(cli.format, &summary)
         }
-        MstatCommand::Diff { .. } => Err(unsupported("mstat diff", "Phase 3")),
+        MstatCommand::Diff { before, after, top } => {
+            let report = diff_paths(before, after, cli.memory_limit.0, *top).map_err(|error| {
+                if error.diagnostic.code == "mstat.io" {
+                    AppError::IoDiagnostic(error.diagnostic)
+                } else if error.diagnostic.code.starts_with("resource.") {
+                    AppError::Resource(error.diagnostic)
+                } else {
+                    AppError::Mstat(error)
+                }
+            })?;
+            render_mstat_diff(cli.format, &report)
+        }
     }
 }
 
@@ -300,6 +318,7 @@ fn render_mstat_summary(format: FormatArg, summary: &MstatSummary) -> Result<Str
             for category in &summary.categories {
                 lines.push(ndjson_line(&summary.schema, "categories", category)?);
             }
+
             Ok(lines.join("\n"))
         }
         FormatArg::Table => {
@@ -351,6 +370,81 @@ fn render_mstat_summary(format: FormatArg, summary: &MstatSummary) -> Result<Str
                     summary.deduplicated_methods.folded_methods,
                 )
                 .expect("writing to String cannot fail");
+            Ok(output)
+        }
+    }
+}
+
+fn render_mstat_diff(format: FormatArg, report: &MstatDiff) -> Result<String, AppError> {
+    match format {
+        FormatArg::Json => serde_json::to_string_pretty(report).map_err(AppError::Json),
+        FormatArg::Ndjson => {
+            let mut lines = vec![
+                serde_json::to_string(&serde_json::json!({
+                    "schema": report.schema,
+                    "section": "summary",
+                    "value": {
+                        "before_assembly": report.before_assembly,
+                        "after_assembly": report.after_assembly,
+                        "before_input_bytes": report.before_input_bytes,
+                        "after_input_bytes": report.after_input_bytes,
+                        "total_delta_bytes": report.total_delta_bytes,
+                        "before_deduplicated_methods": report.before_deduplicated_methods,
+                        "after_deduplicated_methods": report.after_deduplicated_methods,
+                        "reconciliation": report.reconciliation,
+                        "peak_tracked_memory_bytes": report.peak_tracked_memory_bytes,
+                    },
+                }))
+                .map_err(AppError::Json)?,
+            ];
+            for section in &report.sections {
+                lines.push(ndjson_line(&report.schema, "section", section)?);
+                for entry in &section.entries {
+                    lines.push(ndjson_line(
+                        &report.schema,
+                        &format!("{}.entries", section.name),
+                        entry,
+                    )?);
+                }
+            }
+            Ok(lines.join("\n"))
+        }
+        FormatArg::Table => {
+            let mut output = format!(
+                "MSTAT accounted delta: {:+} B\n{} -> {}\nTracked memory peak: {} B\n",
+                report.total_delta_bytes,
+                report.before_assembly,
+                report.after_assembly,
+                report.peak_tracked_memory_bytes,
+            );
+            for section in &report.sections {
+                writeln!(
+                    &mut output,
+                    "\n{}{}: {:+} B ({} added, {} removed, {} changed)",
+                    section.name,
+                    if section.accounted {
+                        ""
+                    } else {
+                        " [breakdown]"
+                    },
+                    section.delta_bytes,
+                    section.added,
+                    section.removed,
+                    section.changed,
+                )
+                .expect("writing to String cannot fail");
+                for entry in &section.entries {
+                    writeln!(
+                        &mut output,
+                        "{:+12} B  {} -> {} records  {}",
+                        entry.delta_bytes,
+                        entry.before_records,
+                        entry.after_records,
+                        entry.identity,
+                    )
+                    .expect("writing to String cannot fail");
+                }
+            }
             Ok(output)
         }
     }

@@ -80,6 +80,9 @@ fn invalid_options_are_rejected_with_exit_code_two() {
         vec!["vitnet", "--format", "yaml", "metadata", "a.csv"],
         vec!["vitnet", "--threads", "0", "metadata", "a.csv"],
         vec!["vitnet", "metadata", "a.csv", "--top", "0"],
+        vec![
+            "vitnet", "mstat", "diff", "a.mstat", "b.mstat", "--top", "0",
+        ],
         vec!["vitnet", "--quiet", "--verbose", "metadata", "a.csv"],
     ] {
         let error = Cli::try_parse_from(arguments).unwrap_err();

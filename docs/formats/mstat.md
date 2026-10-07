@@ -42,6 +42,42 @@ treated as committed Rust heap.
 Only format 2.2 is accepted. Unknown versions fail with a typed diagnostic
 rather than being interpreted using a guessed layout.
 
+## Structural diff contract
+
+`vitnet mstat diff` emits `vitnet.mstat-diff.v1`. It builds compact inventories
+for both inputs, sorts them by a 128-bit BLAKE3 fingerprint, and always compares
+the exact identity bytes after a fingerprint match. Fingerprints are therefore
+an acceleration only, not an identity oracle. Duplicate identities are
+coalesced with checked byte and record totals before the merge diff.
+
+Methods, types, RVA fields, frozen objects, and folded methods use the
+producer's mangled `.names` value as their row-number-independent identity.
+This preserves the producer's namespace, nesting, generic, member, and
+signature distinctions without reconstructing a separate type-system object
+model. Blobs use exact decoded `#US` bytes. Manifest-resource identity is the
+resolved AssemblyRef name and culture followed by the exact resource name.
+Assembly display uses `name, Culture=culture` when culture is non-empty.
+
+This choice deliberately treats producer mangling as an opaque stable
+contract. Vitnet does not demangle or synthesize identities from metadata row
+numbers. The report truncates display values to 256 UTF-8 bytes, but matching
+always uses the complete original bytes.
+
+`Methods`, `Types`, and `Blobs` are marked `accounted: true`. Their signed
+section deltas must sum exactly to `total_delta_bytes`; the machine-readable
+`reconciliation.balanced` field is false only if that invariant fails, in
+which case the command returns an internal diagnostic instead of a report.
+RVA fields, frozen objects, resources, and deduplicated methods are reported
+as non-accounted breakdowns to prevent double counting. `--top` bounds
+materialized change entries per section; additions, removals, changes, and
+section totals remain exact.
+
+MSTAT 2.2 records folding membership but not the size of every folded-away
+body. The summary and diff contracts therefore report exact group and folded
+method counts while leaving `estimated_savings_bytes` as `null` rather than
+inventing a size from the surviving body. Folding data remains separate from
+accounted totals.
+
 ## Independent tiny fixture map
 
 `crates/vitnet-mstat/tests/summary.rs` constructs a complete 2,048-byte PE

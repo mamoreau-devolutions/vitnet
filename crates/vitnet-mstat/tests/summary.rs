@@ -1,5 +1,5 @@
 use proptest::prelude::*;
-use vitnet_mstat::summarize;
+use vitnet_mstat::{diff, summarize};
 
 const FILE_ALIGNMENT: usize = 0x200;
 const TEXT_RVA: u32 = 0x2000;
@@ -102,6 +102,45 @@ fn json_representation_is_deterministic_and_versioned() {
         serde_json::to_string(&second).unwrap()
     );
     assert_eq!(first.schema, "vitnet.mstat-summary.v1");
+}
+
+#[test]
+fn structural_diff_reconciles_changed_method_size() {
+    let before = fixture();
+    let mut after = fixture();
+    after.bytes[after.methods_code_offset + 6] = 15;
+
+    let report = diff(&before.bytes, &after.bytes, 16 * 1024 * 1024, 10).unwrap();
+    assert_eq!(report.schema, "vitnet.mstat-diff.v1");
+    assert_eq!(report.total_delta_bytes, 5);
+    assert!(report.reconciliation.balanced);
+    assert_eq!(report.reconciliation.section_delta_sum, 5);
+    let methods = report
+        .sections
+        .iter()
+        .find(|section| section.name == "Methods")
+        .unwrap();
+    assert_eq!(methods.changed, 1);
+    assert_eq!(methods.delta_bytes, 5);
+    assert_eq!(methods.entries.len(), 1);
+    assert_eq!(methods.entries[0].before_bytes, 13);
+    assert_eq!(methods.entries[0].after_bytes, 18);
+}
+
+#[test]
+fn identical_structural_diff_is_empty_and_deterministic() {
+    let fixture = fixture();
+    let first = diff(&fixture.bytes, &fixture.bytes, 16 * 1024 * 1024, 10).unwrap();
+    let second = diff(&fixture.bytes, &fixture.bytes, 16 * 1024 * 1024, 10).unwrap();
+    assert_eq!(first, second);
+    assert_eq!(first.total_delta_bytes, 0);
+    assert!(first.reconciliation.balanced);
+    assert!(
+        first
+            .sections
+            .iter()
+            .all(|section| section.entries.is_empty())
+    );
 }
 
 proptest! {
