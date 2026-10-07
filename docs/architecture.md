@@ -9,8 +9,8 @@ and stable serialization:
 - `vitnet-report`: `vitnet.metadata.v1` and comparison envelopes.
 - `vitnet-mstat`: checked, zero-copy PE/ECMA-335 and synthetic record-stream
   parsing for MSTAT summaries.
-- `vitnet-dgml`: pull-based NativeAOT DGML statistics with dense per-node
-  presence and fan-in state.
+- `vitnet-dgml`: pull-based NativeAOT DGML statistics and bounded external-memory
+  immutable graph indexing.
 - `vitnet-cli`: argument validation, input selection, and report projection.
 
 ## Streaming path
@@ -83,6 +83,73 @@ NativeAOT's dense IDs allow one presence bit and one `u32` fan-in counter per
 possible node. Reasons are interned only once. Top-N fan-in is selected with a
 bounded heap, while the in-degree histogram is accumulated after the stream.
 All output ordering is deterministic.
+
+## DGML index path
+
+The index streams plain XML or one selected ZIP member into a UTF-8 label
+sidecar, 16-byte node records, 24-byte temporary label records, 32-byte temporary
+edge records, and a deduplicated reason sidecar. Only a node-presence bitset and
+interned reason table remain in memory during ingestion. Sparse node records
+carry an explicit presence flag; duplicate declarations keep the first label.
+The pull reader limits each XML event before the event buffer can grow without
+bound.
+
+Owned labels are sorted in bounded chunks and emitted to temporary runs.
+No random comparisons touch a memory-mapped multi-gigabyte label file. Edges
+are sorted by target, source, reason offset/length, and flags. Both pipelines
+use multi-pass merges with a maximum fan-in of 16 and 64 KiB per-run buffers.
+Labels become an FST keyed by UTF-8 label, NUL separator, and big-endian node
+ID. Incoming edges become 24-byte records with a CSR offset table. Parallel
+links are preserved.
+
+NativeAOT's pinned producer already emits numeric IDs, so the generalized
+text-ID resolution/hash partition pass in the plan is unnecessary for this
+profile. Generic string-ID DGML is explicitly rejected rather than guessed.
+The implemented external sort partitions by bounded sorted run, not by hash.
+
+Generation files are checksummed and synced before their build directory is
+renamed. A synced temporary pointer atomically replaces `CURRENT` using
+`tempfile::persist`, including on Windows. A persistent lock file holds a
+kernel exclusive build/prune lock or shared inspection/verification lock.
+Dropping the handle or process termination releases the lock; stale PID/start
+metadata is overwritten only after successfully acquiring it. The lock file
+is never unlinked, avoiding split-lock races.
+
+Readers keep a shared cache lock for their entire operation; builders/pruners
+fail explicitly if the cache is in use. This conservative policy avoids
+generation deletion races without pretending to support simultaneous
+publication and readers yet. Phase 5 must retain equivalent lifetime protection
+for query readers.
+
+Cancellation is checked between XML batches, sort runs, merge batches, hash
+chunks, and before publication. Phase callbacks are opt-in and sent to stderr
+by the CLI. RAII removes the exact uncommitted build directory on ordinary
+errors/cancellation; forced process termination leaves a hidden build for
+`cache prune`. Input size, modification time, and prefix/suffix fingerprint
+are rechecked before publication; strict mode also repeats the full input hash.
+Filesystem/I/O failures remain explicit.
+
+### Turso evaluation
+
+Turso is not a production dependency or a replacement for the disk index.
+An isolated local prototype compares batched disk-table ingestion with the
+custom sidecars; synthetic short-label measurements do not establish RDM
+scalability.
+
+At the user's suggestion, the conceptual reference was
+[`devolutions/cirup@28ae91e0c5c075beddffe426b7dd512a8aca00eb`](https://github.com/devolutions/cirup/tree/28ae91e0c5c075beddffe426b7dd512a8aca00eb).
+Its
+[`query_backend.rs`](https://github.com/devolutions/cirup/blob/28ae91e0c5c075beddffe426b7dd512a8aca00eb/cirup_core/src/query_backend.rs)
+Turso path uses an in-memory database with lazy materialization of regular
+tables from retained resource vectors and chunked inserts. Its separate
+[`vtab.rs`](https://github.com/devolutions/cirup/blob/28ae91e0c5c075beddffe426b7dd512a8aca00eb/cirup_core/src/vtab.rs)
+virtual-table adapter is for rusqlite, not the Turso path.
+
+Lazy SQL views over bounded query results are a useful future option, but
+materializing all graph rows or retaining resource vectors would violate the
+large-graph memory contract. The repository exposed no license declaration at
+that revision, so no Cirup code is copied, translated, vendored, or depended
+upon. Only the architectural distinction is recorded here.
 
 ## MSTAT summary path
 

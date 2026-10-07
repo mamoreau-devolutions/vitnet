@@ -100,15 +100,54 @@ endpoints, and tracked peak memory. Memory is proportional to the maximum
 numeric node ID, not the input byte size. See
 [`docs/formats/dgml-profile.md`](docs/formats/dgml-profile.md).
 
+## DGML disk index
+
+Build an immutable, disk-backed index for a NativeAOT graph:
+
+```console
+vitnet --memory-limit 2GiB --progress always dgml index app.scan.dgml.xml --cache-dir graph-cache
+vitnet --format json dgml index app.codegen.dgml.xml --cache-dir graph-cache
+```
+
+ZIP inputs are streamed without extraction. A ZIP with multiple `.xml`/`.dgml`
+members requires `--entry <member-name>`; a ZIP with one member selects it
+automatically. `--strict` additionally records a full BLAKE3 input hash.
+
+The report names the input-specific **index directory** inside `graph-cache`.
+Use that directory, not the cache root, for maintenance:
+
+```console
+vitnet cache info <index-directory>
+vitnet cache verify <index-directory>
+vitnet cache prune <index-directory>
+```
+
+Verification checks all required payload hashes, record shapes, node presence,
+and CSR offsets. Pruning removes interrupted builds and superseded generations
+while preserving `CURRENT`. Competing builds, verification, and pruning are
+protected by operating-system file locks. Ctrl+C cancels an index build
+cooperatively without publishing a partial generation.
+
+Indexing uses bounded sort runs and at most 16 merge inputs at a time, not an
+in-memory graph or a multi-gigabyte label mapping. It needs at least 16 MiB of
+configured memory and enough free disk for the old generation, new generation,
+and temporary runs. `temporary_bytes` reports temporary data remaining at
+successful completion (zero), not peak disk consumption. Numeric IDs are
+bounded relative to the memory budget to reject pathological sparse CSR
+allocations. Labels/reasons must contain valid XML 1.0 text.
+
 Useful global controls include:
 
 - `--memory-limit 256MiB` bounds retained analysis state and the largest
   logical CSV/XML record.
-- `--temp-dir <path>` validates the directory reserved for future spill/index
-  work.
+- `--temp-dir <path>` selects the DGML cache root when `--cache-dir` is absent;
+  otherwise indexes default to `.vitnet-cache` beside the input. Metadata
+  analysis still has no disk spill.
 - `--threads <n>` sets the worker ceiling used by shared resource policy.
 - `--strict` rejects malformed quoting and backwards offsets that cannot be
-  explained by a 25-bit rollover.
+  explained by a 25-bit rollover; DGML indexing records a full input hash.
+- `--progress auto|always|never` controls DGML index phase messages on stderr;
+  `--quiet` suppresses them.
 - `--format table|json|ndjson` selects human, stable document, or streaming
   machine output.
 
@@ -142,15 +181,30 @@ cargo clippy --workspace --all-targets --all-features -- -D warnings
 cargo test --workspace
 cargo bench -p vitnet-metadata --bench metadata_decoder
 cargo deny check
+cargo deny --manifest-path fuzz/Cargo.toml check
 ```
 
 Fuzz targets for metadata, MSTAT, and DGML parser boundaries are under `fuzz/`
 and can be run with `cargo fuzz run metadata_decoder`, `mstat_summary`, or
 `dgml_stats` after installing `cargo-fuzz`.
+Compilation-only validation uses
+`cargo check --manifest-path fuzz/Cargo.toml --bins`. On Windows MSVC,
+linking fuzz executables also requires the `/include:main` linker argument,
+which `cargo-fuzz` supplies. Unsanitized, uninstrumented executable smoke
+checks are not a coverage-guided fuzzing campaign.
+CI compiles these boundaries and enforces dependency policy for both the
+workspace and the separate fuzz package, including libFuzzer's permissive
+NCSA license.
 
-DGML index/search/why expose stable placeholders and return typed
-unsupported-input diagnostics. They require the immutable external-memory
-DGML index phases in the roadmap.
+DGML search/why remain stable placeholders for Phase 5. Index building,
+statistics, and cache maintenance are implemented.
+
+The opt-in 101 GiB logical-graph benchmark generates its input in memory a
+record at a time; no 101 GiB fixture is stored:
+
+```console
+cargo test --release -p vitnet-dgml --lib indexes_101_gib_logical_graph_with_bounded_state -- --ignored --nocapture
+```
 
 See [`docs/vitnet-build-plan.md`](docs/vitnet-build-plan.md) for the phased
 roadmap and [`docs/format-provenance.md`](docs/format-provenance.md) for the

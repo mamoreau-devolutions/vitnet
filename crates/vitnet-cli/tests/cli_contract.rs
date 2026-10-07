@@ -193,7 +193,7 @@ fn comparison_mode_reports_signed_kind_delta() {
 }
 
 #[test]
-fn resource_limit_and_placeholder_commands_use_stable_exit_codes() {
+fn resource_limit_and_missing_inputs_use_stable_exit_codes() {
     let tiny_budget = Cli::try_parse_from([
         "vitnet",
         "--memory-limit",
@@ -213,10 +213,7 @@ fn resource_limit_and_placeholder_commands_use_stable_exit_codes() {
         ExitCode::IoOrCache
     );
     let dgml = Cli::try_parse_from(["vitnet", "dgml", "index", "a.dgml.xml"]).unwrap();
-    assert_eq!(
-        execute(&dgml).unwrap_err().exit_code(),
-        ExitCode::MalformedInput
-    );
+    assert_eq!(execute(&dgml).unwrap_err().exit_code(), ExitCode::IoOrCache);
 }
 
 #[test]

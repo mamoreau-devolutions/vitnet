@@ -7,10 +7,17 @@ license.workspace = true
 repository.workspace = true
 
 [dependencies]
+blake3.workspace = true
+fs4.workspace = true
+fst.workspace = true
 quick-xml.workspace = true
 serde.workspace = true
+serde_json.workspace = true
+sysinfo.workspace = true
+tempfile.workspace = true
 thiserror.workspace = true
 vitnet-core.workspace = true
+zip.workspace = true
 
 [dev-dependencies]
 proptest.workspace = true

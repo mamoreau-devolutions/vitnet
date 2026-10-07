@@ -1,5 +1,12 @@
 //! Bounded-memory `NativeAOT` DGML streaming statistics.
 
+mod index;
+
+pub use index::{
+    DgmlCacheInfo, DgmlCachePruneReport, DgmlCacheVerification, DgmlIndexManifest, DgmlIndexReport,
+    IndexControl, IndexFeatures, IndexOptions, build_index, cache_info, prune_cache, verify_cache,
+};
+
 use quick_xml::XmlVersion;
 use quick_xml::events::{BytesStart, Event};
 use quick_xml::reader::Reader;

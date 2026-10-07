@@ -114,7 +114,7 @@ the safe read-only mapping boundary used by the unsafe-code-forbidden
 workspace. The parser itself contains no unsafe code and builds no managed
 metadata object graph.
 
-## NativeAOT DGML (Phase 4 statistics)
+## NativeAOT DGML (Phase 4 statistics and index)
 
 The NativeAOT baseline is the same pinned runtime commit above. General DGML
 semantics were checked against
@@ -137,6 +137,20 @@ The pull parser dependency is `quick-xml` 0.42.0, corresponding to
 [`tafia/quick-xml@36a2c52a4f6c90878c3f60c3c3b5c62efaef28a9`](https://github.com/tafia/quick-xml/commit/36a2c52a4f6c90878c3f60c3c3b5c62efaef28a9).
 The aggregation structures, memory charging, deterministic ranking, and
 `vitnet.dgml-stats.v1` schema are independent vitnet designs.
+
+The index uses the same pinned producer contract: decimal IDs, opaque
+labels, and source/target/reason links. Its binary sidecars, presence flag,
+external sort, label FST, CSR addressing, cache key, locking protocol,
+generation layout, checksums, and `vitnet.dgml-index.v1` report were designed
+independently for vitnet. No other analyzer's cache was inspected or used.
+Generated Rust fixtures establish escaped labels/reasons, duplicate labels,
+duplicate IDs, parallel edges, sparse nodes, malformed input, ZIP selection,
+cancellation, locking, and cache integrity.
+
+The ZIP reader preserves entry identity and delegates stored/deflate decoding
+to the permissively licensed `zip` crate. XML labels/reasons are UTF-8 and
+follow XML 1.0 character constraints; NUL is rejected rather than confused
+with the independently chosen FST key separator.
 
 ## Evidence maintenance
 

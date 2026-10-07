@@ -1,10 +1,27 @@
 use clap::Parser;
-use std::io::Write;
-use vitnet_cli::{Cli, execute};
+use std::io::{IsTerminal, Write};
+use vitnet_cli::{Cli, Command, DgmlCommand, ModeArg, execute_with_index_control};
+use vitnet_dgml::IndexControl;
 
 fn main() {
     let cli = Cli::parse();
-    match execute(&cli) {
+    let mut control = IndexControl::default();
+    if !cli.quiet
+        && (cli.progress == ModeArg::Always
+            || (cli.progress == ModeArg::Auto && std::io::stderr().is_terminal()))
+    {
+        control.progress =
+            Some(|phase, records| eprintln!("dgml.index: {phase} ({records} records)"));
+    }
+    let cancellation = control.clone();
+    if matches!(&cli.command, Command::Dgml(arguments) if matches!(arguments.command, DgmlCommand::Index { .. }))
+    {
+        if let Err(error) = ctrlc::set_handler(move || cancellation.cancel()) {
+            eprintln!("io.signal_handler: {error}");
+            std::process::exit(vitnet_core::ExitCode::IoOrCache.as_i32());
+        }
+    }
+    match execute_with_index_control(&cli, &control) {
         Ok(output) => {
             if let Some(path) = &cli.output {
                 if let Err(error) = std::fs::write(path, output) {

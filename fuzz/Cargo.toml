@@ -3,15 +3,16 @@ name = "vitnet-fuzz"
 version = "0.0.0"
 publish = false
 edition = "2024"
+license = "MIT"
 
 [package.metadata]
 cargo-fuzz = true
 
 [dependencies]
 libfuzzer-sys = "0.4"
-vitnet-dgml = { path = "../crates/vitnet-dgml" }
-vitnet-metadata = { path = "../crates/vitnet-metadata" }
-vitnet-mstat = { path = "../crates/vitnet-mstat" }
+vitnet-dgml = { version = "0.1.0", path = "../crates/vitnet-dgml" }
+vitnet-metadata = { version = "0.1.0", path = "../crates/vitnet-metadata" }
+vitnet-mstat = { version = "0.1.0", path = "../crates/vitnet-mstat" }
 
 [[bin]]
 name = "metadata_decoder"

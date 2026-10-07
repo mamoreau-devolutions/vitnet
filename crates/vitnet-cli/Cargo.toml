@@ -10,6 +10,7 @@ name = "vitnet"
 path = "src/main.rs"
 
 [dependencies]
+ctrlc.workspace = true
 clap.workspace = true
 serde_json.workspace = true
 serde.workspace = true

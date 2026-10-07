@@ -6,7 +6,11 @@ use std::io::Read;
 use std::num::NonZeroUsize;
 use std::path::{Path, PathBuf};
 use vitnet_core::{ByteSize, Diagnostic, ExitCode, ResourceBudget};
-use vitnet_dgml::{DgmlError, DgmlStats, StatsOptions, analyze_stats};
+use vitnet_dgml::{
+    DgmlCacheInfo, DgmlCachePruneReport, DgmlCacheVerification, DgmlError, DgmlIndexReport,
+    DgmlStats, IndexControl, IndexOptions, StatsOptions, analyze_stats, build_index, cache_info,
+    prune_cache, verify_cache,
+};
 use vitnet_metadata::{
     Aggregate, AnalysisOptions, MetadataError, StreamingDecoder,
     analyze_stream_with_aggregate_limit,
@@ -71,6 +75,8 @@ pub enum Command {
     Mstat(PlaceholderCommand<MstatCommand>),
     /// `NativeAOT` dependency-graph analysis.
     Dgml(PlaceholderCommand<DgmlCommand>),
+    /// Inspect and maintain immutable vitnet cache generations.
+    Cache(PlaceholderCommand<CacheCommand>),
 }
 
 #[derive(Clone, Debug, Args)]
@@ -96,6 +102,10 @@ pub enum MstatCommand {
 pub enum DgmlCommand {
     Index {
         input: PathBuf,
+        #[arg(long)]
+        cache_dir: Option<PathBuf>,
+        #[arg(long)]
+        entry: Option<String>,
     },
     Stats {
         input: PathBuf,
@@ -110,6 +120,13 @@ pub enum DgmlCommand {
         input: PathBuf,
         query: String,
     },
+}
+
+#[derive(Clone, Debug, Subcommand)]
+pub enum CacheCommand {
+    Info { path: PathBuf },
+    Verify { path: PathBuf },
+    Prune { path: PathBuf },
 }
 
 #[derive(Clone, Debug, Args)]
@@ -256,10 +273,20 @@ fn classify_metadata_error(error: MetadataError) -> AppError {
 /// Returns an I/O, malformed-input, resource, unsupported-command, or
 /// serialization error with a stable exit-code mapping.
 pub fn execute(cli: &Cli) -> Result<String, AppError> {
+    execute_with_index_control(cli, &IndexControl::default())
+}
+
+/// Executes commands with cooperative DGML index cancellation and progress.
+///
+/// # Errors
+///
+/// Returns the same typed diagnostics as [`execute`].
+pub fn execute_with_index_control(cli: &Cli, control: &IndexControl) -> Result<String, AppError> {
     match &cli.command {
         Command::Metadata(arguments) => execute_metadata(cli, arguments),
         Command::Mstat(arguments) => execute_mstat(cli, &arguments.command),
-        Command::Dgml(arguments) => execute_dgml(cli, &arguments.command),
+        Command::Dgml(arguments) => execute_dgml(cli, &arguments.command, control),
+        Command::Cache(arguments) => execute_cache(cli, &arguments.command),
     }
 }
 
@@ -450,9 +477,50 @@ fn render_mstat_diff(format: FormatArg, report: &MstatDiff) -> Result<String, Ap
     }
 }
 
-fn execute_dgml(cli: &Cli, command: &DgmlCommand) -> Result<String, AppError> {
+fn execute_dgml(
+    cli: &Cli,
+    command: &DgmlCommand,
+    control: &IndexControl,
+) -> Result<String, AppError> {
     validate_resources(cli)?;
     match command {
+        DgmlCommand::Index {
+            input,
+            cache_dir,
+            entry,
+        } => {
+            let cache_root = cache_dir.clone().unwrap_or_else(|| {
+                cli.temp_dir.clone().unwrap_or_else(|| {
+                    input
+                        .parent()
+                        .unwrap_or_else(|| Path::new("."))
+                        .join(".vitnet-cache")
+                })
+            });
+            let report = build_index(
+                input,
+                &IndexOptions {
+                    cache_root,
+                    memory_limit: cli.memory_limit.0,
+                    selected_entry: entry.clone(),
+                    strict_hash: cli.strict,
+                    control: control.clone(),
+                },
+            )
+            .map_err(|mut error| {
+                error.diagnostic.input_path = Some(input.clone());
+                if error.diagnostic.code.starts_with("resource.")
+                    || error.diagnostic.code == "dgml.index.locked"
+                {
+                    AppError::Resource(error.diagnostic)
+                } else if error.diagnostic.code.starts_with("io.") {
+                    AppError::IoDiagnostic(error.diagnostic)
+                } else {
+                    AppError::Dgml(error)
+                }
+            })?;
+            render_dgml_index(cli.format, &report)
+        }
         DgmlCommand::Stats { input, top } => {
             let input_bytes = input
                 .metadata()
@@ -483,9 +551,104 @@ fn execute_dgml(cli: &Cli, command: &DgmlCommand) -> Result<String, AppError> {
             })?;
             render_dgml_stats(cli.format, &stats)
         }
-        DgmlCommand::Index { .. } | DgmlCommand::Search { .. } | DgmlCommand::Why { .. } => Err(
-            unsupported("dgml", "the remaining Phase 4 and Phase 5 index/query work"),
-        ),
+        DgmlCommand::Search { .. } | DgmlCommand::Why { .. } => Err(unsupported(
+            "dgml",
+            "the remaining Phase 5 index/query work",
+        )),
+    }
+}
+
+fn render_dgml_index(format: FormatArg, report: &DgmlIndexReport) -> Result<String, AppError> {
+    match format {
+        FormatArg::Json => serde_json::to_string_pretty(report).map_err(AppError::Json),
+        FormatArg::Ndjson => serde_json::to_string(report).map_err(AppError::Json),
+        FormatArg::Table => Ok(format!(
+            "DGML index: {}\nGeneration: {}\nNodes: {}\nEdges: {}\nIndex size: {} B\nTracked memory peak: {} B\nUnresolved endpoints: {}\n",
+            report.index_directory.display(),
+            report.generation,
+            report.manifest.node_count,
+            report.manifest.edge_count,
+            report.index_bytes,
+            report.peak_tracked_memory_bytes,
+            report.manifest.unresolved_endpoints,
+        )),
+    }
+}
+
+fn execute_cache(cli: &Cli, command: &CacheCommand) -> Result<String, AppError> {
+    validate_resources(cli)?;
+    match command {
+        CacheCommand::Info { path } => {
+            let value = cache_info(path).map_err(cache_error)?;
+            render_cache_info(cli.format, &value)
+        }
+        CacheCommand::Verify { path } => {
+            let value = verify_cache(path).map_err(cache_error)?;
+            render_cache_verification(cli.format, &value)
+        }
+        CacheCommand::Prune { path } => {
+            let value = prune_cache(path).map_err(cache_error)?;
+            render_cache_prune(cli.format, &value)
+        }
+    }
+}
+
+fn cache_error(error: DgmlError) -> AppError {
+    if error.diagnostic.code == "dgml.index.locked"
+        || error.diagnostic.code.starts_with("resource.")
+    {
+        AppError::Resource(error.diagnostic)
+    } else if error.diagnostic.code.starts_with("io.") {
+        AppError::IoDiagnostic(error.diagnostic)
+    } else {
+        AppError::Dgml(error)
+    }
+}
+
+fn render_cache_info(format: FormatArg, value: &DgmlCacheInfo) -> Result<String, AppError> {
+    match format {
+        FormatArg::Json => serde_json::to_string_pretty(value).map_err(AppError::Json),
+        FormatArg::Ndjson => serde_json::to_string(value).map_err(AppError::Json),
+        FormatArg::Table => Ok(format!(
+            "DGML cache: {}\nGeneration: {}\nNodes: {}\nEdges: {}\nSize: {} B\n",
+            value.index_directory.display(),
+            value.generation,
+            value.manifest.node_count,
+            value.manifest.edge_count,
+            value.index_bytes,
+        )),
+    }
+}
+
+fn render_cache_verification(
+    format: FormatArg,
+    value: &DgmlCacheVerification,
+) -> Result<String, AppError> {
+    match format {
+        FormatArg::Json => serde_json::to_string_pretty(value).map_err(AppError::Json),
+        FormatArg::Ndjson => serde_json::to_string(value).map_err(AppError::Json),
+        FormatArg::Table => Ok(format!(
+            "DGML cache verified: {}\nGeneration: {}\nFiles: {}\nSize: {} B\n",
+            value.index_directory.display(),
+            value.generation,
+            value.files_verified,
+            value.index_bytes,
+        )),
+    }
+}
+
+fn render_cache_prune(format: FormatArg, value: &DgmlCachePruneReport) -> Result<String, AppError> {
+    match format {
+        FormatArg::Json => serde_json::to_string_pretty(value).map_err(AppError::Json),
+        FormatArg::Ndjson => serde_json::to_string(value).map_err(AppError::Json),
+        FormatArg::Table => Ok(format!(
+            "DGML cache pruned: {}\nCurrent generation: {}\nGenerations removed: {}\nTemporary directories removed: {}\nBytes removed: {}\n",
+            value.index_directory.display(),
+            value.current_generation,
+            value.generations_removed,
+            value.temporary_directories_removed,
+            value.bytes_removed,
+        )),
     }
 }
 
