@@ -6,10 +6,12 @@ use std::io::Read;
 use std::num::NonZeroUsize;
 use std::path::{Path, PathBuf};
 use vitnet_core::{ByteSize, Diagnostic, ExitCode, ResourceBudget};
+use vitnet_dgml::{DgmlError, DgmlStats, StatsOptions, analyze_stats};
 use vitnet_metadata::{
     Aggregate, AnalysisOptions, MetadataError, StreamingDecoder,
     analyze_stream_with_aggregate_limit,
 };
+use vitnet_mstat::{MstatError, MstatSummary, summarize_path};
 use vitnet_report::{InputDescriptor, MetadataComparisonEnvelope, MetadataEnvelope};
 
 const DEFAULT_MEMORY_LIMIT: u64 = 2 * 1024 * 1024 * 1024;
@@ -66,9 +68,8 @@ pub struct Cli {
 #[derive(Clone, Debug, Subcommand)]
 pub enum Command {
     Metadata(MetadataArgs),
-    /// Reserved for Phase 2/3. The syntax is stable; analysis is not implemented.
     Mstat(PlaceholderCommand<MstatCommand>),
-    /// Reserved for Phase 4/5. The syntax is stable; analysis is not implemented.
+    /// `NativeAOT` dependency-graph analysis.
     Dgml(PlaceholderCommand<DgmlCommand>),
 }
 
@@ -86,10 +87,22 @@ pub enum MstatCommand {
 
 #[derive(Clone, Debug, Subcommand)]
 pub enum DgmlCommand {
-    Index { input: PathBuf },
-    Stats { input: PathBuf },
-    Search { input: PathBuf, query: String },
-    Why { input: PathBuf, query: String },
+    Index {
+        input: PathBuf,
+    },
+    Stats {
+        input: PathBuf,
+        #[arg(long, value_parser = parse_positive_usize, default_value_t = 50)]
+        top: usize,
+    },
+    Search {
+        input: PathBuf,
+        query: String,
+    },
+    Why {
+        input: PathBuf,
+        query: String,
+    },
 }
 
 #[derive(Clone, Debug, Args)]
@@ -133,6 +146,8 @@ pub enum AppError {
     },
     IoDiagnostic(Box<Diagnostic>),
     Metadata(MetadataError),
+    Dgml(DgmlError),
+    Mstat(MstatError),
     Resource(Box<Diagnostic>),
     Unsupported(Box<Diagnostic>),
     Json(serde_json::Error),
@@ -143,7 +158,9 @@ impl AppError {
     pub const fn exit_code(&self) -> ExitCode {
         match self {
             Self::Io { .. } | Self::IoDiagnostic(_) => ExitCode::IoOrCache,
-            Self::Metadata(_) | Self::Unsupported(_) => ExitCode::MalformedInput,
+            Self::Metadata(_) | Self::Dgml(_) | Self::Mstat(_) | Self::Unsupported(_) => {
+                ExitCode::MalformedInput
+            }
             Self::Resource(_) => ExitCode::ResourceLimit,
             Self::Json(_) => ExitCode::InternalInvariant,
         }
@@ -155,6 +172,8 @@ impl std::fmt::Display for AppError {
         match self {
             Self::Io { path, source } => write!(formatter, "{}: {source}", path.display()),
             Self::Metadata(error) => error.fmt(formatter),
+            Self::Dgml(error) => error.fmt(formatter),
+            Self::Mstat(error) => error.fmt(formatter),
             Self::IoDiagnostic(diagnostic)
             | Self::Resource(diagnostic)
             | Self::Unsupported(diagnostic) => diagnostic.fmt(formatter),
@@ -232,8 +251,220 @@ fn classify_metadata_error(error: MetadataError) -> AppError {
 pub fn execute(cli: &Cli) -> Result<String, AppError> {
     match &cli.command {
         Command::Metadata(arguments) => execute_metadata(cli, arguments),
-        Command::Mstat(_) => Err(unsupported("mstat", "Phase 2 and Phase 3")),
-        Command::Dgml(_) => Err(unsupported("dgml", "Phase 4 and Phase 5")),
+        Command::Mstat(arguments) => execute_mstat(cli, &arguments.command),
+        Command::Dgml(arguments) => execute_dgml(cli, &arguments.command),
+    }
+}
+
+fn execute_mstat(cli: &Cli, command: &MstatCommand) -> Result<String, AppError> {
+    validate_resources(cli)?;
+    match command {
+        MstatCommand::Summary { input } => {
+            let summary = summarize_path(input, cli.memory_limit.0).map_err(|error| {
+                if error.diagnostic.code == "mstat.io" {
+                    AppError::IoDiagnostic(error.diagnostic)
+                } else if error.diagnostic.code.starts_with("resource.") {
+                    AppError::Resource(error.diagnostic)
+                } else {
+                    AppError::Mstat(error)
+                }
+            })?;
+            render_mstat_summary(cli.format, &summary)
+        }
+        MstatCommand::Diff { .. } => Err(unsupported("mstat diff", "Phase 3")),
+    }
+}
+
+fn render_mstat_summary(format: FormatArg, summary: &MstatSummary) -> Result<String, AppError> {
+    match format {
+        FormatArg::Json => serde_json::to_string_pretty(summary).map_err(AppError::Json),
+        FormatArg::Ndjson => {
+            let mut lines = vec![
+                serde_json::to_string(&serde_json::json!({
+                    "schema": summary.schema,
+                    "section": "summary",
+                    "value": {
+                        "format_version": summary.format_version,
+                        "assembly": summary.assembly,
+                        "input_bytes": summary.input_bytes,
+                        "accounted_size_bytes": summary.accounted_size_bytes,
+                        "mangled_names_bytes": summary.mangled_names_bytes,
+                        "methods": summary.methods,
+                        "frozen_objects": summary.frozen_objects,
+                        "deduplicated_methods": summary.deduplicated_methods,
+                        "peak_tracked_memory_bytes": summary.peak_tracked_memory_bytes,
+                    },
+                }))
+                .map_err(AppError::Json)?,
+            ];
+            for category in &summary.categories {
+                lines.push(ndjson_line(&summary.schema, "categories", category)?);
+            }
+            Ok(lines.join("\n"))
+        }
+        FormatArg::Table => {
+            let mut output = format!(
+                "MSTAT {}.{}: {}\nAccounted size: {} B\nInput: {} B\nMangled names: {} B\nTracked memory peak: {} B\n",
+                summary.format_version.major,
+                summary.format_version.minor,
+                summary.assembly,
+                summary.accounted_size_bytes,
+                summary.input_bytes,
+                summary.mangled_names_bytes,
+                summary.peak_tracked_memory_bytes,
+            );
+            output
+                .push_str("\nStreams\nRecords      Items        Size (B)     Encoded (B)  Name\n");
+            for category in &summary.categories {
+                writeln!(
+                    &mut output,
+                    "{:<12} {:<12} {:<12} {:<12} {}",
+                    category.records,
+                    category.items,
+                    category.aggregate_size_bytes,
+                    category.encoded_bytes,
+                    category.name,
+                )
+                .expect("writing to String cannot fail");
+            }
+            writeln!(
+                &mut output,
+                "\nMethods: bodies {} B, GC info {} B, EH info {} B",
+                summary.methods.body_bytes,
+                summary.methods.gc_info_bytes,
+                summary.methods.exception_info_bytes,
+            )
+            .expect("writing to String cannot fail");
+            writeln!(
+                &mut output,
+                "Frozen objects: owned {} / {} B, unowned {} / {} B",
+                summary.frozen_objects.owned_records,
+                summary.frozen_objects.owned_bytes,
+                summary.frozen_objects.unowned_records,
+                summary.frozen_objects.unowned_bytes,
+            )
+            .expect("writing to String cannot fail");
+            writeln!(
+                    &mut output,
+                    "Deduplicated methods: {} groups, {} folded methods; savings not estimated in summary mode",
+                    summary.deduplicated_methods.groups,
+                    summary.deduplicated_methods.folded_methods,
+                )
+                .expect("writing to String cannot fail");
+            Ok(output)
+        }
+    }
+}
+
+fn execute_dgml(cli: &Cli, command: &DgmlCommand) -> Result<String, AppError> {
+    validate_resources(cli)?;
+    match command {
+        DgmlCommand::Stats { input, top } => {
+            let input_bytes = input
+                .metadata()
+                .map_err(|source| AppError::Io {
+                    path: input.clone(),
+                    source,
+                })?
+                .len();
+            let file = File::open(input).map_err(|source| AppError::Io {
+                path: input.clone(),
+                source,
+            })?;
+            let stats = analyze_stats(
+                file,
+                StatsOptions {
+                    top: *top,
+                    memory_limit: cli.memory_limit.0,
+                    input_bytes,
+                },
+            )
+            .map_err(|mut error| {
+                error.diagnostic.input_path = Some(input.clone());
+                if error.diagnostic.code.starts_with("resource.") {
+                    AppError::Resource(error.diagnostic)
+                } else {
+                    AppError::Dgml(error)
+                }
+            })?;
+            render_dgml_stats(cli.format, &stats)
+        }
+        DgmlCommand::Index { .. } | DgmlCommand::Search { .. } | DgmlCommand::Why { .. } => Err(
+            unsupported("dgml", "the remaining Phase 4 and Phase 5 index/query work"),
+        ),
+    }
+}
+
+fn render_dgml_stats(format: FormatArg, stats: &DgmlStats) -> Result<String, AppError> {
+    match format {
+        FormatArg::Json => serde_json::to_string_pretty(stats).map_err(AppError::Json),
+        FormatArg::Ndjson => {
+            let mut lines = vec![
+                serde_json::to_string(&serde_json::json!({
+                    "schema": stats.schema,
+                    "section": "summary",
+                    "value": {
+                        "input_bytes": stats.input_bytes,
+                        "node_count": stats.node_count,
+                        "edge_count": stats.edge_count,
+                        "max_node_id": stats.max_node_id,
+                        "duplicate_node_ids": stats.duplicate_node_ids,
+                        "unresolved_endpoints": stats.unresolved_endpoints,
+                        "peak_tracked_memory_bytes": stats.peak_tracked_memory_bytes,
+                    },
+                }))
+                .map_err(AppError::Json)?,
+            ];
+            for reason in &stats.reasons {
+                lines.push(ndjson_line(&stats.schema, "reasons", reason)?);
+            }
+            for bucket in &stats.in_degree_distribution {
+                lines.push(ndjson_line(
+                    &stats.schema,
+                    "in_degree_distribution",
+                    bucket,
+                )?);
+            }
+            for entry in &stats.largest_fan_in {
+                lines.push(ndjson_line(&stats.schema, "largest_fan_in", entry)?);
+            }
+            Ok(lines.join("\n"))
+        }
+        FormatArg::Table => {
+            let mut output = format!(
+                "DGML: {} nodes, {} edges\nInput: {} B\nDuplicate node IDs: {}\nUnresolved endpoints: {}\nTracked memory peak: {} B\n",
+                stats.node_count,
+                stats.edge_count,
+                stats.input_bytes,
+                stats.duplicate_node_ids,
+                stats.unresolved_endpoints,
+                stats.peak_tracked_memory_bytes,
+            );
+            output.push_str("\nLargest fan-in\nEdges        Node ID\n");
+            for entry in &stats.largest_fan_in {
+                writeln!(
+                    &mut output,
+                    "{:<12} {}",
+                    entry.incoming_edges, entry.node_id
+                )
+                .expect("writing to String cannot fail");
+            }
+            output.push_str("\nIn-degree distribution\nEdges        Nodes\n");
+            for bucket in &stats.in_degree_distribution {
+                writeln!(
+                    &mut output,
+                    "{:<12} {}",
+                    bucket.incoming_edges, bucket.nodes
+                )
+                .expect("writing to String cannot fail");
+            }
+            output.push_str("\nReasons\nEdges        Reason\n");
+            for reason in &stats.reasons {
+                writeln!(&mut output, "{:<12} {}", reason.count, reason.name)
+                    .expect("writing to String cannot fail");
+            }
+            Ok(output)
+        }
     }
 }
 
@@ -387,6 +618,12 @@ fn analyze_path(
         match &mut error {
             AppError::Metadata(metadata) => {
                 metadata.diagnostic.input_path = Some(path.to_owned());
+            }
+            AppError::Mstat(mstat) => {
+                mstat.diagnostic.input_path = Some(path.to_owned());
+            }
+            AppError::Dgml(dgml) => {
+                dgml.diagnostic.input_path = Some(path.to_owned());
             }
             AppError::IoDiagnostic(diagnostic)
             | AppError::Resource(diagnostic)

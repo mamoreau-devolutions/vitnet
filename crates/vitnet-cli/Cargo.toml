@@ -15,7 +15,9 @@ serde_json.workspace = true
 serde.workspace = true
 sysinfo.workspace = true
 vitnet-core.workspace = true
+vitnet-dgml.workspace = true
 vitnet-metadata.workspace = true
+vitnet-mstat.workspace = true
 vitnet-report.workspace = true
 
 [dev-dependencies]

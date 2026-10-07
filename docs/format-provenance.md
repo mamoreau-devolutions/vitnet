@@ -74,6 +74,70 @@ tie-breaking, aggregation model, output schema, and comparison model are
 independent vitnet designs. A strict backwards transition that cannot be a
 25-bit rollover is rejected rather than guessed.
 
+## NativeAOT MSTAT (Phase 2)
+
+The MSTAT evidence baseline is
+[`dotnet/runtime@2eb7113245f7c536ab876dca5e3533fb96c81bbf`](https://github.com/dotnet/runtime/tree/2eb7113245f7c536ab876dca5e3533fb96c81bbf).
+
+- [`MstatObjectDumper.cs`](https://github.com/dotnet/runtime/blob/2eb7113245f7c536ab876dca5e3533fb96c81bbf/src/coreclr/tools/aot/ILCompiler.Compiler/Compiler/MstatObjectDumper.cs#L25-L29)
+  identifies the current producer format as 2.2.
+- [Assembly construction](https://github.com/dotnet/runtime/blob/2eb7113245f7c536ab876dca5e3533fb96c81bbf/src/coreclr/tools/aot/ILCompiler.Compiler/Compiler/MstatObjectDumper.cs#L46-L52)
+  stores that logical version in the generated assembly version. It is
+  independent of the ECMA-335 metadata-root version.
+- [Stream emission](https://github.com/dotnet/runtime/blob/2eb7113245f7c536ab876dca5e3533fb96c81bbf/src/coreclr/tools/aot/ILCompiler.Compiler/Compiler/MstatObjectDumper.cs#L58-L205)
+  defines the `Methods`, `Types`, `Blobs`, `RvaFields`, `FrozenObjects`,
+  `ManifestResources`, and `DeduplicatedMethods` synthetic method bodies and
+  their ordered token/integer fields.
+- [PE construction](https://github.com/dotnet/runtime/blob/2eb7113245f7c536ab876dca5e3533fb96c81bbf/src/coreclr/tools/aot/ILCompiler.Compiler/Compiler/MstatObjectDumper.cs#L214-L257)
+  appends the custom `.names` section used by 2.x name offsets.
+- [`TypeSystemMetadataEmitter.cs`](https://github.com/dotnet/runtime/blob/2eb7113245f7c536ab876dca5e3533fb96c81bbf/src/coreclr/tools/Common/TypeSystem/MetadataEmitter/TypeSystemMetadataEmitter.cs)
+  stores each synthetic stream through `MethodBodyStreamEncoder`.
+- [`InstructionEncoder.cs`](https://github.com/dotnet/runtime/blob/2eb7113245f7c536ab876dca5e3533fb96c81bbf/src/libraries/System.Reflection.Metadata/src/System/Reflection/Metadata/Ecma335/Encoding/InstructionEncoder.cs)
+  defines the `ldtoken`, `ldstr`, and shortest-form `ldc.i4` encodings.
+- [`56ee31f0bd81fdf53c4eea50cf6016a3a545467c`](https://github.com/dotnet/runtime/commit/56ee31f0bd81fdf53c4eea50cf6016a3a545467c)
+  introduced MSTAT 2.0 and moved mangled names from the size-limited `#US`
+  heap into `.names`.
+- [`59c1734be1da981f354d342097aa2ccbf1ed7ef9`](https://github.com/dotnet/runtime/commit/59c1734be1da981f354d342097aa2ccbf1ed7ef9)
+  introduced 2.1 specialized RVA-field, frozen-object, and manifest-resource
+  streams. The producer deliberately also retains those categories in
+  `Blobs`; totals must not count both representations.
+- [`9c3a1bcdffa60376cc758c3a7d7af11f4b1d82b2`](https://github.com/dotnet/runtime/commit/9c3a1bcdffa60376cc758c3a7d7af11f4b1d82b2)
+  introduced 2.2 deduplicated-method groups.
+
+MSTAT parsing is derived from these public producer contracts and ECMA-335 PE
+metadata rules. Local large-file validation does not contribute private names,
+tokens, or fixture bytes to the repository.
+
+Tests construct a minimal PE/CLI metadata image and all seven record streams
+independently in Rust. `mmap-guard` is MIT OR Apache-2.0 licensed and provides
+the safe read-only mapping boundary used by the unsafe-code-forbidden
+workspace. The parser itself contains no unsafe code and builds no managed
+metadata object graph.
+
+## NativeAOT DGML (Phase 4 statistics)
+
+The NativeAOT baseline is the same pinned runtime commit above. General DGML
+semantics were checked against
+[`MicrosoftDocs/visualstudio-docs@653cd6e4ffe7e1ff69ba2c4eade3c29ed49a4336`](https://github.com/MicrosoftDocs/visualstudio-docs/commit/653cd6e4ffe7e1ff69ba2c4eade3c29ed49a4336).
+
+- [NativeAOT build integration](https://github.com/dotnet/runtime/blob/2eb7113245f7c536ab876dca5e3533fb96c81bbf/src/coreclr/nativeaot/BuildIntegration/Microsoft.NETCore.Native.targets#L271-L275)
+  maps `IlcGenerateDgmlFile` to scan and codegen DGML outputs.
+- [The graph writer](https://github.com/dotnet/runtime/blob/2eb7113245f7c536ab876dca5e3533fb96c81bbf/src/coreclr/tools/aot/ILCompiler.DependencyAnalysisFramework/DgmlWriter.cs#L28-L46)
+  emits the Microsoft DGML namespace, then `Nodes`, then `Links`.
+- [Node emission](https://github.com/dotnet/runtime/blob/2eb7113245f7c536ab876dca5e3533fb96c81bbf/src/coreclr/tools/aot/ILCompiler.DependencyAnalysisFramework/DgmlWriter.cs#L104-L121)
+  assigns dense zero-based decimal IDs and opaque labels.
+- [Link emission](https://github.com/dotnet/runtime/blob/2eb7113245f7c536ab876dca5e3533fb96c81bbf/src/coreclr/tools/aot/ILCompiler.DependencyAnalysisFramework/DgmlWriter.cs#L124-L183)
+  defines source, target, reason, and presentation stroke behavior, including
+  empty root reasons and conditional dependency links.
+- [Runtime parser tests](https://github.com/dotnet/runtime/blob/2eb7113245f7c536ab876dca5e3533fb96c81bbf/src/coreclr/tools/aot/DependencyGraphViewer/Tests/TestFileParsing.cs#L60-L130)
+  establish dangling-link rejection and preservation of parallel links with
+  distinct reasons.
+
+The pull parser dependency is `quick-xml` 0.42.0, corresponding to
+[`tafia/quick-xml@36a2c52a4f6c90878c3f60c3c3b5c62efaef28a9`](https://github.com/tafia/quick-xml/commit/36a2c52a4f6c90878c3f60c3c3b5c62efaef28a9).
+The aggregation structures, memory charging, deterministic ranking, and
+`vitnet.dgml-stats.v1` schema are independent vitnet designs.
+
 ## Evidence maintenance
 
 Before changing a non-obvious format rule, record the public Microsoft runtime

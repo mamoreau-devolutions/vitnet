@@ -9,11 +9,27 @@ cargo-fuzz = true
 
 [dependencies]
 libfuzzer-sys = "0.4"
+vitnet-dgml = { path = "../crates/vitnet-dgml" }
 vitnet-metadata = { path = "../crates/vitnet-metadata" }
+vitnet-mstat = { path = "../crates/vitnet-mstat" }
 
 [[bin]]
 name = "metadata_decoder"
 path = "fuzz_targets/metadata_decoder.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "mstat_summary"
+path = "fuzz_targets/mstat_summary.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "dgml_stats"
+path = "fuzz_targets/dgml_stats.rs"
 test = false
 doc = false
 bench = false

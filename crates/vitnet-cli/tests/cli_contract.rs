@@ -207,13 +207,24 @@ fn resource_limit_and_placeholder_commands_use_stable_exit_codes() {
     let mstat = Cli::try_parse_from(["vitnet", "mstat", "summary", "a.mstat"]).unwrap();
     assert_eq!(
         execute(&mstat).unwrap_err().exit_code(),
-        ExitCode::MalformedInput
+        ExitCode::IoOrCache
     );
-    let dgml = Cli::try_parse_from(["vitnet", "dgml", "stats", "a.dgml.xml"]).unwrap();
+    let dgml = Cli::try_parse_from(["vitnet", "dgml", "index", "a.dgml.xml"]).unwrap();
     assert_eq!(
         execute(&dgml).unwrap_err().exit_code(),
         ExitCode::MalformedInput
     );
+}
+
+#[test]
+fn malformed_mstat_maps_to_typed_exit_code_three() {
+    let directory = tempfile::tempdir().unwrap();
+    let input = directory.path().join("bad.mstat");
+    std::fs::write(&input, b"not a PE").unwrap();
+    let cli = Cli::try_parse_from(["vitnet", "mstat", "summary", input.to_str().unwrap()]).unwrap();
+    let error = execute(&cli).unwrap_err();
+    assert!(matches!(error, AppError::Mstat(_)));
+    assert_eq!(error.exit_code(), ExitCode::MalformedInput);
 }
 
 #[test]

@@ -1,6 +1,8 @@
 [workspace]
 members = [
     "crates/vitnet-core",
+    "crates/vitnet-dgml",
+    "crates/vitnet-mstat",
     "crates/vitnet-metadata",
     "crates/vitnet-report",
     "crates/vitnet-cli",
@@ -18,12 +20,16 @@ repository = "https://github.com/mamoreau-devolutions/vitnet"
 [workspace.dependencies]
 clap = { version = "4.5", features = ["derive"] }
 criterion = "0.7"
+mmap-guard = "0.2"
 proptest = "1.6"
+quick-xml = "=0.42.0"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 sysinfo = { version = "0.33", default-features = false, features = ["system"] }
 thiserror = "2.0"
 vitnet-core = { version = "0.1.0", path = "crates/vitnet-core" }
+vitnet-dgml = { version = "0.1.0", path = "crates/vitnet-dgml" }
+vitnet-mstat = { version = "0.1.0", path = "crates/vitnet-mstat" }
 vitnet-metadata = { version = "0.1.0", path = "crates/vitnet-metadata" }
 vitnet-report = { version = "0.1.0", path = "crates/vitnet-report" }
 

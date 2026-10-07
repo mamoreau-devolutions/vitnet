@@ -1,4 +1,4 @@
-# Phase 0/1 architecture
+# Architecture
 
 The workspace separates command handling, shared contracts, metadata analysis,
 and stable serialization:
@@ -7,8 +7,11 @@ and stable serialization:
 - `vitnet-metadata`: CSV decoder, 24/25-bit offset normalization, owner-context
   propagation, interning, aggregation, comparison, and preview logic.
 - `vitnet-report`: `vitnet.metadata.v1` and comparison envelopes.
-- `vitnet-cli`: argument validation, input selection, report projection, and
-  Phase 2-5 placeholders.
+- `vitnet-mstat`: checked, zero-copy PE/ECMA-335 and synthetic record-stream
+  parsing for MSTAT summaries.
+- `vitnet-dgml`: pull-based NativeAOT DGML statistics with dense per-node
+  presence and fan-in state.
+- `vitnet-cli`: argument validation, input selection, and report projection.
 
 ## Streaming path
 
@@ -68,3 +71,27 @@ Parser code forbids unsafe Rust. Checked arithmetic is used for epochs and
 signed `i128` values for comparisons. Decoder and analyzer failures carry
 stable codes and available path/byte/record/line context. `decode_metadata_prefix`
 is the property-test and fuzz target boundary.
+
+## DGML statistics path
+
+`vitnet-dgml` consumes XML events through `quick-xml` with one reusable event
+buffer. It rejects DTD/entity events and parses only numeric node IDs plus link
+source, target, and reason attributes. No DOM, labels, or adjacency graph are
+retained.
+
+NativeAOT's dense IDs allow one presence bit and one `u32` fan-in counter per
+possible node. Reasons are interned only once. Top-N fan-in is selected with a
+bounded heap, while the in-degree histogram is accumulated after the stream.
+All output ordering is deterministic.
+
+## MSTAT summary path
+
+`vitnet-mstat` maps an input read-only and validates PE sections, the CLI
+metadata directory, `#~` and `#Strings`, required table widths, and synthetic
+method bodies through borrowed slices. It does not create a general managed
+metadata object model or retain a record per type or method.
+
+Each of the seven MSTAT 2.2 streams is decoded with an exact opcode state
+machine and aggregated immediately. Accounted totals use the compatibility
+`Methods + Types + Blobs` view; the specialized RVA-field, frozen-object, and
+resource streams are exposed as breakdowns without double-counting them.
