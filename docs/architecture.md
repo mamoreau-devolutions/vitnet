@@ -94,10 +94,22 @@ carry an explicit presence flag; duplicate declarations keep the first label.
 The pull reader limits each XML event before the event buffer can grow without
 bound.
 
-Owned labels are sorted in bounded chunks and emitted to temporary runs.
+Labels are packed into a bounded UTF-8 arena and sorted through compact
+node-ID/range records, avoiding one heap allocation per label during sorting.
 No random comparisons touch a memory-mapped multi-gigabyte label file. Edges
 are sorted by target, source, reason offset/length, and flags. Both pipelines
-use multi-pass merges with a maximum fan-in of 16 and 64 KiB per-run buffers.
+use multi-pass merges with 64 KiB per-run buffers. Merge fan-in is 16 for
+small sort budgets and 128 when the sort budget is at least 256 MiB. The wider
+bounded merge avoids an intermediate read/write pass when all runs fit;
+the smaller-budget path retains its original buffer/handle bound.
+Tournament trees update only the winning run's path rather than comparing
+every head for every emitted record. Label merge heads reuse their byte
+buffers, including the temporary FST key suffix, instead of allocating a new
+buffer per node. The on-disk keys and records remain unchanged.
+The Windows CLI selects mimalloc as its global allocator after measuring both
+allocators against the full local graphs. Libraries, fuzz hosts, and other
+platforms retain the system allocator; no cross-platform allocator speedup
+is assumed.
 Labels become an FST keyed by UTF-8 label, NUL separator, and big-endian node
 ID. Incoming edges become 24-byte records with a CSR offset table. Parallel
 links are preserved.

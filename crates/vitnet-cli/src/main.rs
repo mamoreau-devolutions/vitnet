@@ -3,6 +3,10 @@ use std::io::{IsTerminal, Write};
 use vitnet_cli::{Cli, Command, DgmlCommand, ModeArg, execute_with_index_control};
 use vitnet_dgml::IndexControl;
 
+#[cfg(windows)]
+#[global_allocator]
+static ALLOCATOR: mimalloc::MiMalloc = mimalloc::MiMalloc;
+
 fn main() {
     let cli = Cli::parse();
     let mut control = IndexControl::default();

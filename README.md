@@ -11,7 +11,8 @@ unknown and all totals are explicitly lower bounds.
 
 ## Install from source
 
-The workspace uses Rust 1.85 or newer.
+The workspace uses Rust 1.85 or newer. Windows MSVC builds also need the C
+toolchain from Visual Studio Build Tools for the CLI's mimalloc allocator.
 
 ```console
 cargo build --release -p vitnet-cli
@@ -128,13 +129,19 @@ while preserving `CURRENT`. Competing builds, verification, and pruning are
 protected by operating-system file locks. Ctrl+C cancels an index build
 cooperatively without publishing a partial generation.
 
-Indexing uses bounded sort runs and at most 16 merge inputs at a time, not an
-in-memory graph or a multi-gigabyte label mapping. It needs at least 16 MiB of
+Indexing uses packed label arenas, reusable merge buffers, and tournament-tree
+selection rather than an in-memory graph or a multi-gigabyte label mapping.
+There are at most 128 merge inputs when the sort budget is at least 256 MiB,
+or 16 for smaller budgets. Indexing needs at least 16 MiB of
 configured memory and enough free disk for the old generation, new generation,
 and temporary runs. `temporary_bytes` reports temporary data remaining at
 successful completion (zero), not peak disk consumption. Numeric IDs are
 bounded relative to the memory budget to reject pathological sparse CSR
 allocations. Labels/reasons must contain valid XML 1.0 text.
+The Windows CLI uses mimalloc, selected by full-corpus throughput measurements;
+other platforms retain their system allocator. Index formats are unchanged.
+See [`docs/performance-budget.md`](docs/performance-budget.md) for measured
+strategy comparisons and their limitations.
 
 Useful global controls include:
 

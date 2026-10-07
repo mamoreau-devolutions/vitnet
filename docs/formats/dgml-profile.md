@@ -127,5 +127,10 @@ is run explicitly in release mode using the command in the README.
 | Complete checksum coverage and structural CSR checks | `rejects_incomplete_checksums_and_invalid_csr_even_when_rehashed` |
 | FST container validation beyond payload hashing | `verification_rejects_rehashed_invalid_label_fst` |
 | Bounded merge fan-in and exact record preservation | `index::tests::bounded_multi_pass_merge_preserves_all_records` |
+| Tournament selection with empty, singleton, uneven, and non-power-of-two run sets | `index::tests::tournament_merge_matches_exact_sort_for_empty_singleton_and_uneven_runs` |
+| Reused merge buffers preserve shorter/empty labels and remove prior key suffixes | `index::tests::label_refill_reuses_capacity_and_removes_previous_key_suffix` |
+| Packed label sorting preserves long prefixes, duplicate labels, empty labels, and UTF-8 keys | `index::tests::packed_label_sort_preserves_long_prefixes_duplicates_and_empty_labels` |
+| Packed runs respect their charged budget and preserve records deferred to the next run | `index::tests::packed_label_runs_enforce_budget_without_losing_pending_records` |
+| Wider merge fan-in activates at the exact large-sort-budget threshold | `index::tests::merge_fan_in_expands_only_with_a_large_sort_budget` |
 | 101 GiB logical graph with exact parallel-edge count and bounded state | `index::tests::indexes_101_gib_logical_graph_with_bounded_state` |
 | Optional local corpora with final ingestion guards and expected counts | `index::tests::validates_optional_local_corpus_with_final_ingestion_guards` |

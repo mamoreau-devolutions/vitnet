@@ -24,6 +24,7 @@ const MIN_SORT_MEMORY: u64 = 8 * 1024 * 1024;
 const MIN_INDEX_MEMORY: u64 = 16 * 1024 * 1024;
 const MAX_SORT_MEMORY: u64 = 512 * 1024 * 1024;
 const MERGE_FAN_IN: usize = 16;
+const LARGE_MERGE_FAN_IN: usize = 128;
 const RUN_BUFFER_SIZE: usize = 64 * 1024;
 const REQUIRED_FILES: [&str; 7] = [
     "manifest.json",
@@ -188,6 +189,71 @@ struct LabelRecord {
 struct OwnedLabel {
     node_id: u64,
     value: Vec<u8>,
+}
+
+struct BufferedLabel {
+    node_id: u64,
+    range: std::ops::Range<usize>,
+}
+
+struct MergeTree {
+    leaves: usize,
+    winners: Vec<Option<usize>>,
+}
+
+impl MergeTree {
+    fn new<T>(heads: &[Option<T>], compare: impl Fn(&T, &T) -> std::cmp::Ordering) -> Self {
+        let leaves = heads.len().max(1).next_power_of_two();
+        let mut tree = Self {
+            leaves,
+            winners: vec![None; leaves * 2],
+        };
+        for (index, head) in heads.iter().enumerate() {
+            tree.winners[leaves + index] = head.as_ref().map(|_| index);
+        }
+        for node in (1..leaves).rev() {
+            tree.refresh(node, heads, &compare);
+        }
+        tree
+    }
+
+    fn first(&self) -> Option<usize> {
+        self.winners[1]
+    }
+
+    fn update<T>(
+        &mut self,
+        index: usize,
+        heads: &[Option<T>],
+        compare: impl Fn(&T, &T) -> std::cmp::Ordering,
+    ) {
+        let mut node = self.leaves + index;
+        self.winners[node] = heads[index].as_ref().map(|_| index);
+        while node > 1 {
+            node /= 2;
+            self.refresh(node, heads, &compare);
+        }
+    }
+
+    fn refresh<T>(
+        &mut self,
+        node: usize,
+        heads: &[Option<T>],
+        compare: &impl Fn(&T, &T) -> std::cmp::Ordering,
+    ) {
+        self.winners[node] = match (self.winners[node * 2], self.winners[node * 2 + 1]) {
+            (Some(left), Some(right)) => {
+                let left_head = heads[left].as_ref().expect("populated merge winner");
+                let right_head = heads[right].as_ref().expect("populated merge winner");
+                if compare(left_head, right_head).is_le() {
+                    Some(left)
+                } else {
+                    Some(right)
+                }
+            }
+            (left, right) => left.or(right),
+        };
+    }
 }
 
 struct ParsedGraph {
@@ -960,12 +1026,13 @@ fn build_incoming_edges(
     control: &IndexControl,
 ) -> Result<u64, DgmlError> {
     let runs = create_edge_runs(directory, sort_memory, control)?;
-    let runs = reduce_runs(directory, runs, false, control)?;
+    let runs = reduce_runs(directory, runs, false, merge_fan_in(sort_memory), control)?;
     let mut readers = open_edge_runs(&runs)?;
     let mut current = readers
         .iter_mut()
         .map(read_edge)
         .collect::<Result<Vec<_>, _>>()?;
+    let mut tree = MergeTree::new(&current, EdgeRecord::cmp);
     let mut incoming = BufWriter::with_capacity(
         COPY_BUFFER_SIZE,
         File::create(directory.join("incoming-edges.bin"))
@@ -979,7 +1046,7 @@ fn build_incoming_edges(
     let mut next_target = 0_u64;
     let mut emitted = 0_u64;
     let mut unresolved = 0_u64;
-    while let Some(index) = minimum_edge(&current) {
+    while let Some(index) = tree.first() {
         if emitted % 65536 == 0 {
             control.check()?;
         }
@@ -1008,6 +1075,7 @@ fn build_incoming_edges(
             .checked_add(1)
             .ok_or_else(|| resource_error("dgml.index.edges", "edge count overflow"))?;
         current[index] = read_edge(&mut readers[index])?;
+        tree.update(index, &current, EdgeRecord::cmp);
     }
     let required_offsets = max_node_id.map_or(1, |id| id.saturating_add(2));
     while next_target < required_offsets {
@@ -1084,12 +1152,13 @@ fn build_label_fst(
     control: &IndexControl,
 ) -> Result<(), DgmlError> {
     let runs = create_label_runs(directory, sort_memory, control)?;
-    let runs = reduce_runs(directory, runs, true, control)?;
+    let runs = reduce_runs(directory, runs, true, merge_fan_in(sort_memory), control)?;
     let mut readers = open_label_runs(&runs)?;
     let mut current = readers
         .iter_mut()
         .map(read_owned_label)
         .collect::<Result<Vec<_>, _>>()?;
+    let mut tree = MergeTree::new(&current, compare_owned_labels);
     let output = BufWriter::with_capacity(
         COPY_BUFFER_SIZE,
         File::create(directory.join("labels.fst"))
@@ -1098,19 +1167,27 @@ fn build_label_fst(
     let mut builder = fst::MapBuilder::new(output)
         .map_err(|error| io_error("dgml.index.labels", error.to_string()))?;
     let mut emitted = 0_u64;
-    while let Some(index) = minimum_label(&current) {
+    while let Some(index) = tree.first() {
         if emitted % 65536 == 0 {
             control.check()?;
         }
         emitted += 1;
-        let record = current[index].take().expect("selected populated run");
-        let mut key = record.value;
-        key.push(0);
-        key.extend_from_slice(&record.node_id.to_be_bytes());
+        let record = current[index].as_mut().expect("selected populated run");
+        record.value.try_reserve_exact(9).map_err(|error| {
+            resource_error(
+                "resource.memory_limit",
+                format!("unable to grow label key: {error}"),
+            )
+        })?;
+        record.value.push(0);
+        record
+            .value
+            .extend_from_slice(&record.node_id.to_be_bytes());
         builder
-            .insert(&key, record.node_id)
+            .insert(&record.value, record.node_id)
             .map_err(|error| io_error("dgml.index.labels", error.to_string()))?;
-        current[index] = read_owned_label(&mut readers[index])?;
+        refill_owned_label(&mut readers[index], &mut current[index])?;
+        tree.update(index, &current, compare_owned_labels);
     }
     builder
         .finish()
@@ -1143,28 +1220,56 @@ fn create_label_runs(
     let mut string_position = 0_u64;
     let mut runs = Vec::new();
     let mut exhausted = false;
+    let mut pending = None;
     loop {
         control.check()?;
-        let mut records = Vec::<OwnedLabel>::new();
+        let (mut records, mut bytes) = label_sort_buffers(chunk_target)?;
         let mut tracked = 0_u64;
         while tracked < chunk_target {
-            if let Some(record) = read_label(&mut input)? {
+            let next = match pending.take() {
+                Some(record) => Some(record),
+                None => read_label(&mut input)?,
+            };
+            if let Some(record) = next {
+                let charged = u64::from(record.label_len) + size_of::<BufferedLabel>() as u64;
+                if charged > chunk_target {
+                    return Err(resource_error(
+                        "resource.memory_limit",
+                        "label exceeds the sort-run budget",
+                    ));
+                }
+                if tracked + charged > chunk_target {
+                    pending = Some(record);
+                    break;
+                }
                 if string_position != record.label_offset {
                     strings
                         .seek(SeekFrom::Start(record.label_offset))
                         .map_err(|error| io_error("dgml.index.strings", error.to_string()))?;
                 }
-                let mut value = vec![0_u8; record.label_len as usize];
+                let start = bytes.len();
+                let length = record.label_len as usize;
+                bytes.try_reserve(length).map_err(|error| {
+                    resource_error(
+                        "resource.memory_limit",
+                        format!("unable to grow label arena: {error}"),
+                    )
+                })?;
+                records.try_reserve(1).map_err(|error| {
+                    resource_error(
+                        "resource.memory_limit",
+                        format!("unable to grow label records: {error}"),
+                    )
+                })?;
+                bytes.resize(start + length, 0);
                 strings
-                    .read_exact(&mut value)
+                    .read_exact(&mut bytes[start..])
                     .map_err(|error| io_error("dgml.index.strings", error.to_string()))?;
                 string_position = record.label_offset + u64::from(record.label_len);
-                tracked = tracked
-                    .saturating_add(value.capacity() as u64)
-                    .saturating_add(size_of::<OwnedLabel>() as u64);
-                records.push(OwnedLabel {
+                tracked += charged;
+                records.push(BufferedLabel {
                     node_id: record.node_id,
-                    value,
+                    range: start..start + length,
                 });
             } else {
                 exhausted = true;
@@ -1174,7 +1279,11 @@ fn create_label_runs(
         if records.is_empty() {
             break;
         }
-        records.sort_unstable_by(compare_owned_labels);
+        records.sort_unstable_by(|left, right| {
+            bytes[left.range.clone()]
+                .cmp(&bytes[right.range.clone()])
+                .then_with(|| left.node_id.cmp(&right.node_id))
+        });
         let path = directory.join(format!("labels-run-{}.bin", runs.len()));
         let mut output = BufWriter::with_capacity(
             COPY_BUFFER_SIZE,
@@ -1182,7 +1291,7 @@ fn create_label_runs(
                 .map_err(|error| io_error("dgml.index.label_run", error.to_string()))?,
         );
         for record in records {
-            write_owned_label(&mut output, &record)?;
+            write_label_value(&mut output, record.node_id, &bytes[record.range])?;
         }
         output
             .flush()
@@ -1194,6 +1303,28 @@ fn create_label_runs(
         }
     }
     Ok(runs)
+}
+
+fn label_sort_buffers(chunk_target: u64) -> Result<(Vec<BufferedLabel>, Vec<u8>), DgmlError> {
+    let mut records = Vec::new();
+    let mut bytes = Vec::new();
+    let capacity = usize::try_from(chunk_target)
+        .map_err(|_| resource_error("resource.memory_limit", "label arena exceeds usize"))?;
+    bytes.try_reserve_exact(capacity).map_err(|error| {
+        resource_error(
+            "resource.memory_limit",
+            format!("unable to reserve label arena: {error}"),
+        )
+    })?;
+    records
+        .try_reserve_exact(capacity / size_of::<BufferedLabel>() + 1)
+        .map_err(|error| {
+            resource_error(
+                "resource.memory_limit",
+                format!("unable to reserve label records: {error}"),
+            )
+        })?;
+    Ok((records, bytes))
 }
 
 fn check_run_memory(runs: &[PathBuf], sort_memory: u64) -> Result<(), DgmlError> {
@@ -1214,12 +1345,13 @@ fn reduce_runs(
     directory: &Path,
     mut runs: Vec<PathBuf>,
     labels: bool,
+    fan_in: usize,
     control: &IndexControl,
 ) -> Result<Vec<PathBuf>, DgmlError> {
     let mut pass = 0;
-    while runs.len() > MERGE_FAN_IN {
+    while runs.len() > fan_in {
         let mut merged = Vec::new();
-        for (batch, paths) in runs.chunks(MERGE_FAN_IN).enumerate() {
+        for (batch, paths) in runs.chunks(fan_in).enumerate() {
             control.check()?;
             let path = directory.join(format!(
                 "{}-merge-{pass}-{batch}.bin",
@@ -1237,23 +1369,26 @@ fn reduce_runs(
                     .iter_mut()
                     .map(read_owned_label)
                     .collect::<Result<Vec<_>, _>>()?;
-                while let Some(index) = minimum_label(&heads) {
+                let mut tree = MergeTree::new(&heads, compare_owned_labels);
+                while let Some(index) = tree.first() {
                     if emitted % 65536 == 0 {
                         control.check()?;
                     }
                     emitted += 1;
                     write_owned_label(
                         &mut output,
-                        &heads[index].take().expect("populated merge head"),
+                        heads[index].as_ref().expect("populated merge head"),
                     )?;
-                    heads[index] = read_owned_label(&mut readers[index])?;
+                    refill_owned_label(&mut readers[index], &mut heads[index])?;
+                    tree.update(index, &heads, compare_owned_labels);
                 }
             } else {
                 let mut heads = readers
                     .iter_mut()
                     .map(read_edge)
                     .collect::<Result<Vec<_>, _>>()?;
-                while let Some(index) = minimum_edge(&heads) {
+                let mut tree = MergeTree::new(&heads, EdgeRecord::cmp);
+                while let Some(index) = tree.first() {
                     if emitted % 65536 == 0 {
                         control.check()?;
                     }
@@ -1263,6 +1398,7 @@ fn reduce_runs(
                         heads[index].take().expect("populated merge head"),
                     )?;
                     heads[index] = read_edge(&mut readers[index])?;
+                    tree.update(index, &heads, EdgeRecord::cmp);
                 }
             }
             output
@@ -1281,28 +1417,18 @@ fn reduce_runs(
     Ok(runs)
 }
 
+fn merge_fan_in(sort_memory: u64) -> usize {
+    if sort_memory >= 256 * 1024 * 1024 {
+        LARGE_MERGE_FAN_IN
+    } else {
+        MERGE_FAN_IN
+    }
+}
+
 fn compare_owned_labels(left: &OwnedLabel, right: &OwnedLabel) -> std::cmp::Ordering {
     left.value
         .cmp(&right.value)
         .then_with(|| left.node_id.cmp(&right.node_id))
-}
-
-fn minimum_edge(values: &[Option<EdgeRecord>]) -> Option<usize> {
-    values
-        .iter()
-        .enumerate()
-        .filter_map(|(index, value)| value.map(|record| (index, record)))
-        .min_by_key(|(_, record)| *record)
-        .map(|(index, _)| index)
-}
-
-fn minimum_label(values: &[Option<OwnedLabel>]) -> Option<usize> {
-    values
-        .iter()
-        .enumerate()
-        .filter_map(|(index, value)| value.as_ref().map(|record| (index, record)))
-        .min_by(|(_, left), (_, right)| compare_owned_labels(left, right))
-        .map(|(index, _)| index)
 }
 
 fn normalized_attribute<R: std::io::BufRead>(
@@ -1568,26 +1694,59 @@ fn read_label<R: Read>(reader: &mut R) -> Result<Option<LabelRecord>, DgmlError>
 }
 
 fn write_owned_label<W: Write>(writer: &mut W, record: &OwnedLabel) -> Result<(), DgmlError> {
-    let length = u32::try_from(record.value.len())
+    write_label_value(writer, record.node_id, &record.value)
+}
+
+fn write_label_value<W: Write>(
+    writer: &mut W,
+    node_id: u64,
+    value: &[u8],
+) -> Result<(), DgmlError> {
+    let length = u32::try_from(value.len())
         .map_err(|_| resource_error("dgml.index.labels", "label exceeds u32"))?;
     writer
         .write_all(&length.to_le_bytes())
-        .and_then(|()| writer.write_all(&record.node_id.to_le_bytes()))
-        .and_then(|()| writer.write_all(&record.value))
+        .and_then(|()| writer.write_all(&node_id.to_le_bytes()))
+        .and_then(|()| writer.write_all(value))
         .map_err(|error| io_error("dgml.index.label_run", error.to_string()))
 }
 
 fn read_owned_label<R: Read>(reader: &mut R) -> Result<Option<OwnedLabel>, DgmlError> {
+    let mut record = None;
+    refill_owned_label(reader, &mut record)?;
+    Ok(record)
+}
+
+fn refill_owned_label<R: Read>(
+    reader: &mut R,
+    record: &mut Option<OwnedLabel>,
+) -> Result<(), DgmlError> {
     let Some(header) = read_record::<12, _>(reader, "dgml.index.label_run")? else {
-        return Ok(None);
+        *record = None;
+        return Ok(());
     };
     let length = u32::from_le_bytes(header[0..4].try_into().expect("fixed range"));
     let node_id = u64::from_le_bytes(header[4..12].try_into().expect("fixed range"));
-    let mut value = vec![0_u8; length as usize];
+    let record = record.get_or_insert_with(|| OwnedLabel {
+        node_id,
+        value: Vec::new(),
+    });
+    record.node_id = node_id;
+    let length = length as usize;
+    record
+        .value
+        .try_reserve_exact(length.saturating_sub(record.value.len()))
+        .map_err(|error| {
+            resource_error(
+                "resource.memory_limit",
+                format!("unable to grow merge label: {error}"),
+            )
+        })?;
+    record.value.resize(length, 0);
     reader
-        .read_exact(&mut value)
+        .read_exact(&mut record.value)
         .map_err(|error| io_error("dgml.index.label_run", error.to_string()))?;
-    Ok(Some(OwnedLabel { node_id, value }))
+    Ok(())
 }
 
 fn read_record<const N: usize, R: Read>(
@@ -2085,12 +2244,179 @@ mod tests {
     use super::*;
 
     #[test]
+    fn tournament_merge_matches_exact_sort_for_empty_singleton_and_uneven_runs() {
+        for run_count in [0, 1, 2, 3, 15, MERGE_FAN_IN, LARGE_MERGE_FAN_IN] {
+            let mut runs = Vec::new();
+            for run in 0..run_count {
+                let length = if run_count == 1 { 7 } else { run * 3 % 19 };
+                let mut records = (0..length)
+                    .map(|item| EdgeRecord {
+                        target: (item % 3) as u64,
+                        source: (run % 2) as u64,
+                        reason_offset: (item % 5) as u64,
+                        reason_len: u32::try_from(item % 7).unwrap(),
+                        flags: u32::try_from(item % 2).unwrap(),
+                    })
+                    .collect::<Vec<_>>();
+                records.sort_unstable();
+                runs.push(records);
+            }
+            let mut expected = runs.iter().flatten().copied().collect::<Vec<_>>();
+            expected.sort_unstable();
+            let mut iterators = runs.into_iter().map(Vec::into_iter).collect::<Vec<_>>();
+            let mut heads = iterators.iter_mut().map(Iterator::next).collect::<Vec<_>>();
+            let mut tree = MergeTree::new(&heads, EdgeRecord::cmp);
+            let mut actual = Vec::new();
+            while let Some(index) = tree.first() {
+                actual.push(heads[index].take().unwrap());
+                heads[index] = iterators[index].next();
+                tree.update(index, &heads, EdgeRecord::cmp);
+            }
+            assert_eq!(actual, expected, "run count {run_count}");
+        }
+    }
+
+    #[test]
+    fn merge_fan_in_expands_only_with_a_large_sort_budget() {
+        assert_eq!(merge_fan_in(MIN_SORT_MEMORY), MERGE_FAN_IN);
+        assert_eq!(merge_fan_in((256 << 20) - 1), MERGE_FAN_IN);
+        assert_eq!(merge_fan_in(256 << 20), LARGE_MERGE_FAN_IN);
+        assert_eq!(merge_fan_in(MAX_SORT_MEMORY), LARGE_MERGE_FAN_IN);
+    }
+
+    #[test]
+    fn label_refill_reuses_capacity_and_removes_previous_key_suffix() {
+        let first = OwnedLabel {
+            node_id: 3,
+            value: vec![b'x'; 4096],
+        };
+        let mut bytes = Vec::new();
+        write_owned_label(&mut bytes, &first).unwrap();
+        for (node_id, value) in [(2, b"short".to_vec()), (1, Vec::new())] {
+            write_owned_label(&mut bytes, &OwnedLabel { node_id, value }).unwrap();
+        }
+        let mut input = std::io::Cursor::new(bytes);
+        let mut record = read_owned_label(&mut input).unwrap();
+        let label = record.as_mut().unwrap();
+        label.value.try_reserve_exact(9).unwrap();
+        label.value.extend_from_slice(&[0; 9]);
+        let pointer = label.value.as_ptr();
+        let capacity = label.value.capacity();
+        refill_owned_label(&mut input, &mut record).unwrap();
+        let label = record.as_ref().unwrap();
+        assert_eq!(label.node_id, 2);
+        assert_eq!(label.value, b"short");
+        assert_eq!(label.value.as_ptr(), pointer);
+        assert_eq!(label.value.capacity(), capacity);
+        refill_owned_label(&mut input, &mut record).unwrap();
+        let label = record.as_ref().unwrap();
+        assert_eq!(label.node_id, 1);
+        assert!(label.value.is_empty());
+        assert_eq!(label.value.as_ptr(), pointer);
+        refill_owned_label(&mut input, &mut record).unwrap();
+        assert!(record.is_none());
+    }
+
+    #[test]
+    fn packed_label_sort_preserves_long_prefixes_duplicates_and_empty_labels() {
+        let directory = tempfile::tempdir().unwrap();
+        let values = [
+            vec![b'z'; 128 * 1024],
+            b"same".to_vec(),
+            Vec::new(),
+            b"same".to_vec(),
+            [vec![b'z'; 128 * 1024], vec![b'a']].concat(),
+            b"label\xC3\xA9".to_vec(),
+        ];
+        let mut labels = File::create(directory.path().join("labels.tmp")).unwrap();
+        let mut strings = File::create(directory.path().join("strings.bin")).unwrap();
+        let mut offset = 0;
+        for (node_id, value) in values.iter().enumerate() {
+            strings.write_all(value).unwrap();
+            write_label(
+                &mut labels,
+                LabelRecord {
+                    node_id: node_id as u64,
+                    label_offset: offset,
+                    label_len: u32::try_from(value.len()).unwrap(),
+                    flags: 1,
+                },
+            )
+            .unwrap();
+            offset += value.len() as u64;
+        }
+        drop(labels);
+        drop(strings);
+        build_label_fst(directory.path(), MIN_SORT_MEMORY, &IndexControl::default()).unwrap();
+        let map = fst::Map::new(fs::read(directory.path().join("labels.fst")).unwrap()).unwrap();
+        assert_eq!(map.len(), values.len());
+        for (node_id, value) in values.iter().enumerate() {
+            let key = [value.as_slice(), &[0], &(node_id as u64).to_be_bytes()].concat();
+            assert_eq!(map.get(key), Some(node_id as u64));
+        }
+    }
+
+    #[test]
+    fn packed_label_runs_enforce_budget_without_losing_pending_records() {
+        let directory = tempfile::tempdir().unwrap();
+        let mut labels = File::create(directory.path().join("labels.tmp")).unwrap();
+        let mut strings = File::create(directory.path().join("strings.bin")).unwrap();
+        let mut expected = Vec::new();
+        let mut offset = 0;
+        for node_id in 0..137_u64 {
+            let length = [45_000, 60_000, 210_000, 120_000, 64, 0][(node_id % 6) as usize];
+            let value = vec![b'a' + u8::try_from(node_id % 2).unwrap(); length];
+            strings.write_all(&value).unwrap();
+            write_label(
+                &mut labels,
+                LabelRecord {
+                    node_id,
+                    label_offset: offset,
+                    label_len: u32::try_from(length).unwrap(),
+                    flags: 1,
+                },
+            )
+            .unwrap();
+            offset += length as u64;
+            expected.push(OwnedLabel { node_id, value });
+        }
+        drop(labels);
+        drop(strings);
+        let runs =
+            create_label_runs(directory.path(), MIN_SORT_MEMORY, &IndexControl::default()).unwrap();
+        assert!(runs.len() > 1);
+        let mut actual = Vec::new();
+        for path in runs {
+            assert!(file_length(&path).unwrap() <= MIN_SORT_MEMORY / 2);
+            let mut input = File::open(path).unwrap();
+            let start = actual.len();
+            while let Some(record) = read_owned_label(&mut input).unwrap() {
+                actual.push(record);
+            }
+            assert!(
+                actual[start..]
+                    .windows(2)
+                    .all(|pair| compare_owned_labels(&pair[0], &pair[1]).is_le())
+            );
+        }
+        expected.sort_unstable_by(compare_owned_labels);
+        actual.sort_unstable_by(compare_owned_labels);
+        assert_eq!(actual, expected);
+    }
+
+    #[test]
     fn bounded_multi_pass_merge_preserves_all_records() {
+        for fan_in in [MERGE_FAN_IN, LARGE_MERGE_FAN_IN] {
+            assert_bounded_merge(fan_in);
+        }
+    }
+
+    fn assert_bounded_merge(fan_in: usize) {
         let directory = tempfile::tempdir().unwrap();
         let control = IndexControl::default();
         let mut edge_paths = Vec::new();
         let mut label_paths = Vec::new();
-        for run in 0..=(MERGE_FAN_IN * 2) {
+        for run in 0..=(fan_in * 2) {
             let edge_path = directory.path().join(format!("edge-{run}"));
             let label_path = directory.path().join(format!("label-{run}"));
             let mut edges = File::create(&edge_path).unwrap();
@@ -2119,27 +2445,40 @@ mod tests {
             edge_paths.push(edge_path);
             label_paths.push(label_path);
         }
-        let edges = reduce_runs(directory.path(), edge_paths, false, &control).unwrap();
-        let labels = reduce_runs(directory.path(), label_paths, true, &control).unwrap();
-        assert!(edges.len() <= MERGE_FAN_IN);
-        assert!(labels.len() <= MERGE_FAN_IN);
+        let edges = reduce_runs(directory.path(), edge_paths, false, fan_in, &control).unwrap();
+        let labels = reduce_runs(directory.path(), label_paths, true, fan_in, &control).unwrap();
+        assert!(edges.len() <= fan_in);
+        assert!(labels.len() <= fan_in);
         let mut actual_edges = Vec::new();
         for path in edges {
             let mut reader = File::open(path).unwrap();
+            let mut previous = None;
             while let Some(record) = read_edge(&mut reader).unwrap() {
+                assert!(previous.is_none_or(|value| value <= record));
+                previous = Some(record);
                 actual_edges.push(record);
             }
         }
         let mut actual_labels = Vec::new();
         for path in labels {
             let mut reader = File::open(path).unwrap();
+            let mut previous: Option<OwnedLabel> = None;
             while let Some(record) = read_owned_label(&mut reader).unwrap() {
+                assert!(
+                    previous
+                        .as_ref()
+                        .is_none_or(|value| compare_owned_labels(value, &record).is_le())
+                );
+                previous = Some(OwnedLabel {
+                    node_id: record.node_id,
+                    value: record.value.clone(),
+                });
                 actual_labels.push(record);
             }
         }
         actual_edges.sort_unstable();
         actual_labels.sort_unstable_by(compare_owned_labels);
-        let expected = (MERGE_FAN_IN * 2 + 1) * 3;
+        let expected = (fan_in * 2 + 1) * 3;
         assert_eq!(actual_edges.len(), expected);
         assert_eq!(actual_labels.len(), expected);
         for (edge, label) in actual_edges.iter().zip(&actual_labels) {

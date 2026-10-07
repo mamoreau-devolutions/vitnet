@@ -21,6 +21,9 @@ vitnet-metadata.workspace = true
 vitnet-mstat.workspace = true
 vitnet-report.workspace = true
 
+[target.'cfg(windows)'.dependencies]
+mimalloc.workspace = true
+
 [dev-dependencies]
 tempfile = "3.27"
 

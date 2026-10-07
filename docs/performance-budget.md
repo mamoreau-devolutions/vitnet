@@ -145,6 +145,85 @@ mapping and reached 15,953.48 MiB. Replacing that path with bounded owned-label
 sort runs removed the whole-file residency problem. No private input, label,
 generated index, or report is a repository fixture.
 
+### Index-throughput strategy comparison
+
+Full-corpus release measurements on the same Windows reference machine used
+the same 2 GiB budget and unchanged index schema:
+
+| Strategy | Scan wall time | Codegen wall time | Scan peak working set | Codegen peak working set |
+| --- | ---: | ---: | ---: | ---: |
+| Published original bounded index | 734.017 s | 914.567 s | 540.44 MiB | 540.08 MiB |
+| Packed label arenas, reusable heads, tournament merge, 16-way fan-in, system allocator | 707.265 s | 524.101 s | 535.76 MiB | 534.57 MiB |
+| Same pipeline, budget-gated 128-way fan-in, system allocator | 587.347 s | 491.775 s | 535.86 MiB | 534.82 MiB |
+| Same wide-merge pipeline, mimalloc 0.1.52 | 503.586 s | 417.098 s | 537.70 MiB | 536.25 MiB |
+| Winning Windows CLI, final production repeat | 509.776 s | 406.102 s | 537.76 MiB | 560.59 MiB |
+
+The mimalloc strategy won on both inputs. The final production repeat is
+30.55% and 55.60% below the published scan/codegen times, respectively.
+Against the same wide-merge pipeline with the system allocator, the allocator
+prototype reduced time by 14.26% and 15.19%. Its peak sampled private bytes
+were 546.90 MiB and 546.99 MiB; the production repeat reached 546.97 MiB and
+601.85 MiB. Both private bytes and working set remained below 2 GiB.
+The Windows CLI therefore selects mimalloc; other platforms retain their
+system allocator because no corresponding allocator comparison was performed.
+The wrapper and native allocator pass the production cargo-deny policy.
+
+Each candidate preserved all six binary payload BLAKE3 hashes exactly:
+nodes, strings, label FST, CSR offsets, incoming edges, and reasons.
+Normal verification separately checked all seven required files and their
+structures. Generation timestamps are intentionally excluded from old/new
+payload equality. Counts, parallel edges, duplicate ownership, and index
+schema are unchanged.
+
+The wider fan-in is enabled only with at least 256 MiB of sort budget. Smaller
+budgets retain 16 inputs, while 128 inputs avoid an intermediate write/read
+pass when all label runs fit. Both paths have bounded file handles and
+64 KiB reader buffers; tournament selection updates only one root path.
+Packed labels avoid per-record allocation during sorting, and reused heads
+avoid allocating a new label buffer for every merged record.
+
+A separate generated fixed-width edge experiment compared Rust's
+`sort_unstable` with a safe LSD radix sorter. Five alternating repetitions
+checked exact sorted-record equality; input cloning was outside the timer,
+and radix scratch allocation was inside:
+
+| Shape / records | Comparison-sort median | Radix-sort median |
+| --- | ---: | ---: |
+| Random / 250,000 | 7.040 ms | 13.254 ms |
+| Source-grouped / 250,000 | 7.150 ms | 12.485 ms |
+| Ordered / 250,000 | 0.534 ms | 0.612 ms |
+| Random / 2,000,000 | 76.487 ms | 152.329 ms |
+| Source-grouped / 2,000,000 | 77.022 ms | 140.298 ms |
+| Ordered / 2,000,000 | 3.477 ms | 3.529 ms |
+
+Comparison sorting remains the production choice; radix did not win these
+tests. No database backend or index-format change was introduced.
+
+Full graph builds ran sequentially. Cold-cache state and external system load
+were not controlled; the initial 16-way run overlapped short validation/build
+commands. There was one full run per input/candidate followed by the winning
+production CLI repeat, not a statistical
+benchmark campaign, so these results establish the fastest measured option,
+not an unconditional fastest algorithm. Times exclude verification/pruning,
+and peak temporary disk consumption was not measured. Allocator prototypes,
+measurement artifacts, and all private data remain outside the repository.
+
+The final Windows CLI also reran the other local corpora after the global
+allocator change, preserving the exact metadata totals, MSTAT accounted size,
+and balanced zero-delta MSTAT self-comparison:
+
+| Allocator regression check | Wall time | Peak working set | Peak private bytes | Budget |
+| --- | ---: | ---: | ---: | ---: |
+| Strict metadata, with strings | 1.789 s | 179.09 MiB | 196.48 MiB | 256 MiB |
+| MSTAT summary | 1.403 s | 791.38 MiB | 13.57 MiB | 1 GiB |
+| MSTAT self-diff | 4.099 s | 1,205.94 MiB | 444.66 MiB | 2 GiB |
+
+These short checks sampled at 10 ms and include report loading in wall time.
+Mapped-file residency affects MSTAT working set independently of heap:
+a system-allocator summary control also reached 798.55 MiB working set,
+with 6.85 MiB private bytes. No new mapped-file memory regression is inferred
+from comparison with the much smaller historical summary working set.
+
 The final ingestion guards were also exercised independently against both
 full inputs: scan took 112.325 s at 19.46 MiB, and codegen took 351.271 s at
 18.24 MiB. These checks assert the expected node/edge counts but do not
@@ -152,7 +231,7 @@ replace the full index-build measurements above.
 
 ## DGML logical-size acceptance
 
-The opt-in `indexes_101_gib_logical_graph_with_bounded_state` release test
+The original opt-in `indexes_101_gib_logical_graph_with_bounded_state` release test
 generated 108,447,925,960 logical link bytes (just over 101 GiB) without storing
 the XML input. It indexed 26,220,485 parallel edges between two declared nodes,
 with a repeated 4 KiB reason:
@@ -173,8 +252,18 @@ edge preservation, and multi-pass merging under a small memory budget. It
 does not substitute for the high-cardinality RDM label/graph measurements.
 The generated input is streamed through the same ingestion/sort/CSR pipeline;
 publication and cache identity are tested independently with small files.
-The final rerun overlapped the codegen index build. An earlier run took
+That original rerun overlapped the codegen index build. An earlier run took
 143.078 s with an 18.93 MiB peak; neither run controlled cold-cache conditions.
+
+The optimized pipeline's final-source rerun completed in 164.499 s overall
+and 163.664 s inside the pipeline, with an 18.00 MiB sampled working-set peak
+and 15.79 MiB private-byte peak. Logical bytes, exact edge count, CSR sentinel,
+reason sidecar size, zero unresolved endpoints, and 6,557,856-byte tracked
+ingestion state were unchanged. It used the library test host's system
+allocator and 16-way merge under the same small budget, not the Windows CLI's
+mimalloc allocator. No other full graph index ran concurrently; short build/
+validation commands did overlap. High-cardinality labels and the wider merge
+are covered by the complete RDM runs instead.
 
 ## Isolated Turso experiment
 
