@@ -899,6 +899,7 @@ name = "vitnet-mstat"
 version = "0.1.0"
 dependencies = [
  "mmap-guard",
+ "proptest",
  "serde",
  "serde_json",
  "thiserror",

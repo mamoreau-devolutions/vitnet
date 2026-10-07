@@ -11,6 +11,8 @@ const METADATA_SIGNATURE: u32 = 0x424a_5342;
 const CLI_DIRECTORY_INDEX: usize = 14;
 const METHOD_DEF_TABLE: usize = 6;
 const ASSEMBLY_TABLE: usize = 32;
+const USER_STRING_TOKEN: u32 = 0x7000_0000;
+const TOKEN_RID_MASK: u32 = 0x00ff_ffff;
 const REQUIRED_STREAMS: [&str; 7] = [
     "Methods",
     "Types",
@@ -101,6 +103,14 @@ struct Stream {
     size: usize,
 }
 
+#[derive(Clone, Copy)]
+enum EntityKind {
+    Method,
+    Type,
+    Field,
+    AssemblyRef,
+}
+
 struct Tables<'a> {
     bytes: &'a [u8],
     strings: &'a [u8],
@@ -163,9 +173,14 @@ pub fn summarize(bytes: &[u8], memory_limit: u64) -> Result<MstatSummary, MstatE
 
     let image = PeImage::parse(bytes)?;
     let metadata = image.rva_slice(image.metadata_rva, image.metadata_size)?;
-    let (tables_stream, strings_stream) = metadata_streams(metadata)?;
+    let (tables_stream, strings_stream, user_strings_stream) = metadata_streams(metadata)?;
     let tables_bytes = checked_slice(metadata, tables_stream.offset, tables_stream.size)?;
     let strings = checked_slice(metadata, strings_stream.offset, strings_stream.size)?;
+    let user_strings = checked_slice(
+        metadata,
+        user_strings_stream.offset,
+        user_strings_stream.size,
+    )?;
     let tables = Tables::parse(tables_bytes, strings)?;
     let (format_version, assembly) = tables.assembly()?;
     if format_version != (FormatVersion { major: 2, minor: 2 }) {
@@ -182,12 +197,13 @@ pub fn summarize(bytes: &[u8], memory_limit: u64) -> Result<MstatSummary, MstatE
         });
     }
 
-    let names = image
+    let names_section = image
         .sections
         .iter()
         .find(|section| section.name == b".names")
         .ok_or_else(|| malformed("mstat.section.names", "missing .names section", None))?;
-    let mangled_names_bytes = u64::from(names.virtual_size);
+    let names = image.section_logical_slice(names_section)?;
+    let mangled_names_bytes = names.len() as u64;
     let mut categories = Vec::with_capacity(REQUIRED_STREAMS.len());
     let mut details = DecodeDetails::default();
     let mut seen = [false; REQUIRED_STREAMS.len()];
@@ -211,7 +227,9 @@ pub fn summarize(bytes: &[u8], memory_limit: u64) -> Result<MstatSummary, MstatE
         categories.push(decode_category(
             name,
             body,
-            mangled_names_bytes,
+            &tables,
+            names,
+            user_strings,
             &mut details,
         )?);
     }
@@ -254,7 +272,15 @@ pub fn summarize(bytes: &[u8], memory_limit: u64) -> Result<MstatSummary, MstatE
 }
 
 impl<'a> PeImage<'a> {
+    #[allow(clippy::too_many_lines)]
     fn parse(bytes: &'a [u8]) -> Result<Self, MstatError> {
+        if checked_slice(bytes, 0, 2)? != b"MZ" {
+            return Err(malformed(
+                "mstat.pe.dos_signature",
+                "invalid DOS MZ signature",
+                Some(0),
+            ));
+        }
         let pe_offset = usize::try_from(read_u32(bytes, 0x3c)?)
             .map_err(|_| malformed("mstat.pe.offset", "PE offset exceeds usize", Some(0x3c)))?;
         if checked_slice(bytes, pe_offset, 4)? != PE_SIGNATURE {
@@ -274,7 +300,7 @@ impl<'a> PeImage<'a> {
             .ok_or_else(|| malformed("mstat.pe.offset", "optional-header offset overflow", None))?;
         checked_slice(bytes, optional, optional_size)?;
         let magic = read_u16(bytes, optional)?;
-        let directory_offset = match magic {
+        let directory_offset: usize = match magic {
             0x10b => 96,
             0x20b => 112,
             _ => {
@@ -285,8 +311,36 @@ impl<'a> PeImage<'a> {
                 ));
             }
         };
+        let directory_relative = directory_offset
+            .checked_add(CLI_DIRECTORY_INDEX * 8)
+            .ok_or_else(|| {
+                malformed(
+                    "mstat.pe.offset",
+                    "CLI-directory relative offset overflow",
+                    None,
+                )
+            })?;
+        if directory_relative + 8 > optional_size {
+            return Err(malformed(
+                "mstat.pe.cli",
+                "optional header does not contain a CLI data directory",
+                Some(optional as u64),
+            ));
+        }
+        let directory_count_offset = match magic {
+            0x10b => 92,
+            0x20b => 108,
+            _ => unreachable!("PE magic was validated"),
+        };
+        if read_u32(bytes, optional + directory_count_offset)? <= 14 {
+            return Err(malformed(
+                "mstat.pe.cli",
+                "PE declares no CLI data directory",
+                Some((optional + directory_count_offset) as u64),
+            ));
+        }
         let cli_directory = optional
-            .checked_add(directory_offset + CLI_DIRECTORY_INDEX * 8)
+            .checked_add(directory_relative)
             .ok_or_else(|| malformed("mstat.pe.offset", "CLI-directory offset overflow", None))?;
         let cli_rva = read_u32(bytes, cli_directory)?;
         let cli_size = read_u32(bytes, cli_directory + 4)?;
@@ -300,6 +354,10 @@ impl<'a> PeImage<'a> {
         let section_headers = optional
             .checked_add(optional_size)
             .ok_or_else(|| malformed("mstat.pe.offset", "section-header offset overflow", None))?;
+        let section_table_bytes = section_count
+            .checked_mul(40)
+            .ok_or_else(|| malformed("mstat.pe.section", "section table size overflow", None))?;
+        checked_slice(bytes, section_headers, section_table_bytes)?;
         let mut sections = Vec::with_capacity(section_count);
         for index in 0..section_count {
             let offset = section_headers
@@ -329,6 +387,37 @@ impl<'a> PeImage<'a> {
                 raw_size,
                 raw_offset,
             });
+        }
+        for (index, section) in sections.iter().enumerate() {
+            let section_start = u64::from(section.raw_offset);
+            let section_end = section_start + u64::from(section.raw_size);
+            for other in &sections[..index] {
+                let other_start = u64::from(other.raw_offset);
+                let other_end = other_start + u64::from(other.raw_size);
+                if section.raw_size != 0
+                    && other.raw_size != 0
+                    && section_start < other_end
+                    && other_start < section_end
+                {
+                    return Err(malformed(
+                        "mstat.pe.section_overlap",
+                        "PE sections have overlapping raw ranges",
+                        Some(section_start),
+                    ));
+                }
+            }
+        }
+        if sections
+            .iter()
+            .filter(|section| section.name == b".names")
+            .count()
+            > 1
+        {
+            return Err(malformed(
+                "mstat.section.names",
+                "duplicate .names sections",
+                None,
+            ));
         }
         let mut image = Self {
             bytes,
@@ -380,6 +469,26 @@ impl<'a> PeImage<'a> {
             offset,
             usize::try_from(size)
                 .map_err(|_| malformed("mstat.pe.rva", "RVA size exceeds usize", None))?,
+        )
+    }
+
+    fn section_logical_slice(&self, section: &Section<'_>) -> Result<&'a [u8], MstatError> {
+        if section.virtual_size > section.raw_size {
+            return Err(malformed(
+                "mstat.pe.section",
+                format!(
+                    "section {} virtual size exceeds its raw data",
+                    String::from_utf8_lossy(section.name)
+                ),
+                Some(u64::from(section.raw_offset)),
+            ));
+        }
+        checked_slice(
+            self.bytes,
+            usize::try_from(section.raw_offset)
+                .map_err(|_| malformed("mstat.pe.section", "section offset exceeds usize", None))?,
+            usize::try_from(section.virtual_size)
+                .map_err(|_| malformed("mstat.pe.section", "section size exceeds usize", None))?,
         )
     }
 
@@ -622,9 +731,40 @@ impl<'a> Tables<'a> {
             4
         }
     }
+
+    fn validate_token(&self, token: u32, kind: EntityKind) -> Result<(), MstatError> {
+        let table = usize::try_from(token >> 24)
+            .map_err(|_| malformed("mstat.token", "token table exceeds usize", None))?;
+        let rid = token & TOKEN_RID_MASK;
+        let allowed = match kind {
+            EntityKind::Method => matches!(table, 6 | 10 | 43),
+            EntityKind::Type => matches!(table, 1 | 2 | 27),
+            EntityKind::Field => matches!(table, 4 | 10),
+            EntityKind::AssemblyRef => table == 35,
+        };
+        if !allowed {
+            return Err(malformed(
+                "mstat.token.kind",
+                format!("metadata token 0x{token:08x} has an unexpected table"),
+                None,
+            ));
+        }
+        if rid == 0 || rid > self.rows[table] {
+            return Err(malformed(
+                "mstat.token.rid",
+                format!(
+                    "metadata token 0x{token:08x} references row {rid}, but table {table} has {} rows",
+                    self.rows[table]
+                ),
+                None,
+            ));
+        }
+        Ok(())
+    }
 }
 
-fn metadata_streams(metadata: &[u8]) -> Result<(Stream, Stream), MstatError> {
+#[allow(clippy::too_many_lines)]
+fn metadata_streams(metadata: &[u8]) -> Result<(Stream, Stream, Stream), MstatError> {
     let mut cursor = Cursor::new(metadata);
     if cursor.u32()? != METADATA_SIGNATURE {
         return Err(malformed(
@@ -647,6 +787,8 @@ fn metadata_streams(metadata: &[u8]) -> Result<(Stream, Stream), MstatError> {
     let stream_count = usize::from(cursor.u16()?);
     let mut tables = None;
     let mut strings = None;
+    let mut user_strings = None;
+    let mut ranges = Vec::<(usize, usize, String)>::with_capacity(stream_count);
     for _ in 0..stream_count {
         let offset = usize::try_from(cursor.u32()?)
             .map_err(|_| malformed("mstat.metadata.stream", "stream offset exceeds usize", None))?;
@@ -674,35 +816,73 @@ fn metadata_streams(metadata: &[u8]) -> Result<(Stream, Stream), MstatError> {
         cursor.skip(name_end + 1)?;
         cursor.align4()?;
         checked_slice(metadata, offset, size)?;
+        let end = offset
+            .checked_add(size)
+            .ok_or_else(|| malformed("mstat.metadata.stream", "stream range overflow", None))?;
+        if let Some((_, _, existing)) = ranges
+            .iter()
+            .find(|(start, existing_end, _)| size != 0 && offset < *existing_end && *start < end)
+        {
+            return Err(malformed(
+                "mstat.metadata.stream_overlap",
+                format!("metadata streams `{existing}` and `{name}` overlap"),
+                Some(offset as u64),
+            ));
+        }
+        if ranges.iter().any(|(_, _, existing)| existing == name) {
+            return Err(malformed(
+                "mstat.metadata.stream_duplicate",
+                format!("duplicate metadata stream `{name}`"),
+                Some(name_start as u64),
+            ));
+        }
+        ranges.push((offset, end, name.to_owned()));
         let stream = Stream { offset, size };
         match name {
-            "#~" | "#-" => tables = Some(stream),
+            "#~" | "#-" => {
+                if tables.replace(stream).is_some() {
+                    return Err(malformed(
+                        "mstat.metadata.tables",
+                        "multiple metadata table streams",
+                        Some(name_start as u64),
+                    ));
+                }
+            }
             "#Strings" => strings = Some(stream),
+            "#US" => user_strings = Some(stream),
             _ => {}
         }
     }
-    Ok((
-        tables.ok_or_else(|| {
-            malformed(
-                "mstat.metadata.tables",
-                "missing #~ or #- metadata stream",
-                None,
-            )
-        })?,
-        strings.ok_or_else(|| {
-            malformed(
-                "mstat.metadata.strings",
-                "missing #Strings metadata stream",
-                None,
-            )
-        })?,
-    ))
+    let tables = tables.ok_or_else(|| {
+        malformed(
+            "mstat.metadata.tables",
+            "missing #~ or #- metadata stream",
+            None,
+        )
+    })?;
+    let strings = strings.ok_or_else(|| {
+        malformed(
+            "mstat.metadata.strings",
+            "missing #Strings metadata stream",
+            None,
+        )
+    })?;
+    let user_strings = user_strings.ok_or_else(|| {
+        malformed(
+            "mstat.metadata.user_strings",
+            "missing #US metadata stream",
+            None,
+        )
+    })?;
+    Ok((tables, strings, user_strings))
 }
 
 fn decode_category(
     name: &str,
     body: MethodBody<'_>,
-    mangled_names_bytes: u64,
+    tables: &Tables<'_>,
+    names: &[u8],
+    user_strings: &[u8],
     details: &mut DecodeDetails,
 ) -> Result<CategorySummary, MstatError> {
     let mut decoder = IlDecoder::new(body.code, body.file_offset);
@@ -712,11 +892,11 @@ fn decode_category(
     while !decoder.is_empty() {
         match name {
             "Methods" => {
-                decoder.token()?;
+                tables.validate_token(decoder.token()?, EntityKind::Method)?;
                 let body_size = decoder.size()?;
                 let gc_size = decoder.size()?;
                 let eh_size = decoder.size()?;
-                decoder.mangled_name_offset(mangled_names_bytes)?;
+                validate_ser_string(names, decoder.mangled_name_offset(names.len() as u64)?)?;
                 details.methods.body_bytes = checked_add(details.methods.body_bytes, body_size)?;
                 details.methods.gc_info_bytes =
                     checked_add(details.methods.gc_info_bytes, gc_size)?;
@@ -726,22 +906,27 @@ fn decode_category(
                 aggregate = checked_add(aggregate, gc_size)?;
                 aggregate = checked_add(aggregate, eh_size)?;
             }
-            "Types" | "RvaFields" => {
-                decoder.token()?;
+            "Types" => {
+                tables.validate_token(decoder.token()?, EntityKind::Type)?;
                 aggregate = checked_add(aggregate, decoder.size()?)?;
-                decoder.mangled_name_offset(mangled_names_bytes)?;
+                validate_ser_string(names, decoder.mangled_name_offset(names.len() as u64)?)?;
+            }
+            "RvaFields" => {
+                tables.validate_token(decoder.token()?, EntityKind::Field)?;
+                aggregate = checked_add(aggregate, decoder.size()?)?;
+                validate_ser_string(names, decoder.mangled_name_offset(names.len() as u64)?)?;
             }
             "Blobs" => {
-                decoder.string_token()?;
+                validate_user_string(user_strings, decoder.string_token()?)?;
                 aggregate = checked_add(aggregate, decoder.size()?)?;
             }
             "FrozenObjects" => {
-                decoder.token()?;
+                tables.validate_token(decoder.token()?, EntityKind::Type)?;
                 let size = decoder.size()?;
                 aggregate = checked_add(aggregate, size)?;
-                decoder.mangled_name_offset(mangled_names_bytes)?;
+                validate_ser_string(names, decoder.mangled_name_offset(names.len() as u64)?)?;
                 if decoder.peek()? == 0xd0 {
-                    decoder.token()?;
+                    tables.validate_token(decoder.token()?, EntityKind::Type)?;
                     details.frozen.owned_records = checked_add(details.frozen.owned_records, 1)?;
                     details.frozen.owned_bytes = checked_add(details.frozen.owned_bytes, size)?;
                 } else {
@@ -757,12 +942,18 @@ fn decode_category(
                 }
             }
             "ManifestResources" => {
-                decoder.i4()?;
-                decoder.string_token()?;
+                let token = u32::try_from(decoder.i4()?).map_err(|_| {
+                    decoder.error(
+                        "mstat.token",
+                        "manifest-resource assembly token is negative",
+                    )
+                })?;
+                tables.validate_token(token, EntityKind::AssemblyRef)?;
+                validate_user_string(user_strings, decoder.string_token()?)?;
                 aggregate = checked_add(aggregate, decoder.size()?)?;
             }
             "DeduplicatedMethods" => {
-                decoder.token()?;
+                tables.validate_token(decoder.token()?, EntityKind::Method)?;
                 let count = decoder.size()?;
                 if count > decoder.remaining_len() as u64 / 6 {
                     return Err(decoder.error(
@@ -771,8 +962,8 @@ fn decode_category(
                     ));
                 }
                 for _ in 0..count {
-                    decoder.token()?;
-                    decoder.mangled_name_offset(mangled_names_bytes)?;
+                    tables.validate_token(decoder.token()?, EntityKind::Method)?;
+                    validate_ser_string(names, decoder.mangled_name_offset(names.len() as u64)?)?;
                 }
                 items = checked_add(items, count)?;
             }
@@ -1012,6 +1203,95 @@ fn checked_slice(bytes: &[u8], offset: usize, length: usize) -> Result<&[u8], Ms
 fn checked_add(left: u64, right: u64) -> Result<u64, MstatError> {
     left.checked_add(right)
         .ok_or_else(|| malformed("mstat.size.overflow", "MSTAT aggregate overflow", None))
+}
+
+fn validate_ser_string(bytes: &[u8], offset: u64) -> Result<(), MstatError> {
+    let offset = usize::try_from(offset)
+        .map_err(|_| malformed("mstat.names.offset", "name offset exceeds usize", None))?;
+    let (length, prefix) = compressed_unsigned(bytes, offset, "mstat.names")?;
+    let value_offset = offset
+        .checked_add(prefix)
+        .ok_or_else(|| malformed("mstat.names.offset", "name offset overflow", None))?;
+    let value = checked_slice(bytes, value_offset, length)?;
+    std::str::from_utf8(value)
+        .map_err(|_| malformed("mstat.names.utf8", "mangled name is not valid UTF-8", None))?;
+    Ok(())
+}
+
+fn validate_user_string(bytes: &[u8], token: u32) -> Result<(), MstatError> {
+    if token & !TOKEN_RID_MASK != USER_STRING_TOKEN {
+        return Err(malformed(
+            "mstat.user_string.token",
+            format!("invalid #US token 0x{token:08x}"),
+            None,
+        ));
+    }
+    let offset = usize::try_from(token & TOKEN_RID_MASK)
+        .map_err(|_| malformed("mstat.user_string.offset", "#US offset exceeds usize", None))?;
+    let (length, prefix) = compressed_unsigned(bytes, offset, "mstat.user_string")?;
+    if length == 0 || (length - 1) % 2 != 0 {
+        return Err(malformed(
+            "mstat.user_string.length",
+            format!("#US entry has invalid encoded length {length}"),
+            Some(offset as u64),
+        ));
+    }
+    let value_offset = offset
+        .checked_add(prefix)
+        .ok_or_else(|| malformed("mstat.user_string.offset", "#US offset overflow", None))?;
+    let value = checked_slice(bytes, value_offset, length)?;
+    if !matches!(value[length - 1], 0 | 1) {
+        return Err(malformed(
+            "mstat.user_string.terminal",
+            "#US entry has an invalid terminal byte",
+            Some((value_offset + length - 1) as u64),
+        ));
+    }
+    let utf16 = value[..length - 1]
+        .chunks_exact(2)
+        .map(|chunk| u16::from_le_bytes([chunk[0], chunk[1]]));
+    if char::decode_utf16(utf16).any(|scalar| scalar.is_err()) {
+        return Err(malformed(
+            "mstat.user_string.utf16",
+            "#US entry is not valid UTF-16",
+            Some(value_offset as u64),
+        ));
+    }
+    Ok(())
+}
+
+fn compressed_unsigned(
+    bytes: &[u8],
+    offset: usize,
+    code: &str,
+) -> Result<(usize, usize), MstatError> {
+    let first = *bytes
+        .get(offset)
+        .ok_or_else(|| truncated(offset, 1, bytes.len()))?;
+    let (value, width) = if first & 0x80 == 0 {
+        (usize::from(first), 1)
+    } else if first & 0xc0 == 0x80 {
+        let second = *bytes
+            .get(offset + 1)
+            .ok_or_else(|| truncated(offset, 2, bytes.len()))?;
+        ((usize::from(first & 0x3f) << 8) | usize::from(second), 2)
+    } else if first & 0xe0 == 0xc0 {
+        let encoded = checked_slice(bytes, offset, 4)?;
+        (
+            (usize::from(first & 0x1f) << 24)
+                | (usize::from(encoded[1]) << 16)
+                | (usize::from(encoded[2]) << 8)
+                | usize::from(encoded[3]),
+            4,
+        )
+    } else {
+        return Err(malformed(
+            format!("{code}.compressed_length"),
+            format!("invalid compressed unsigned prefix 0x{first:02x}"),
+            Some(offset as u64),
+        ));
+    };
+    Ok((value, width))
 }
 
 fn truncated(offset: usize, length: usize, input_length: usize) -> MstatError {

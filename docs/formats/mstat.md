@@ -41,3 +41,47 @@ treated as committed Rust heap.
 
 Only format 2.2 is accepted. Unknown versions fail with a typed diagnostic
 rather than being interpreted using a guessed layout.
+
+## Independent tiny fixture map
+
+`crates/vitnet-mstat/tests/summary.rs` constructs a complete 2,048-byte PE
+from constants rather than copying a producer or third-party fixture. Its
+layout is intentionally small enough to explain byte-for-byte:
+
+| File range | Contents |
+| --- | --- |
+| `0x000..0x080` | DOS header; `MZ` at 0 and `e_lfanew = 0x80` at `0x3c` |
+| `0x080..0x098` | `PE\0\0` and COFF header; two sections, `0xe0`-byte optional header |
+| `0x098..0x178` | PE32 optional header; CLI directory 14 is RVA `0x2000`, size 72 |
+| `0x178..0x1c8` | `.text` and `.names` section rows |
+| `0x200..0x248` | 72-byte CLI header; metadata is RVA `0x2080` |
+| `0x280..0x409` | 393-byte ECMA-335 metadata root |
+| `0x40c..0x465` | seven aligned tiny synthetic method bodies |
+| `0x600..0x604` | `.names`: `01 61 01 62`, two one-byte SerStrings |
+| remaining bytes | zero section/file alignment padding |
+
+The metadata root is 76 bytes. Its streams are:
+
+| Stream | Relative offset | Size | Purpose |
+| --- | ---: | ---: | --- |
+| `#~` | `0x04c` | 218 | Module, TypeDef, Field, seven MethodDef, Assembly, and AssemblyRef rows |
+| `#Strings` | `0x126` | 94 | synthetic method names and `tiny.mstat` |
+| `#US` | `0x184` | 5 | reserved byte plus empty strings at offsets 1 and 3 |
+
+The fixture's method code bytes, excluding each one-byte tiny header, are:
+
+| Method | Bytes |
+| --- | --- |
+| `Methods` | `d0 01 00 00 06 1f 0a 18 17 16` |
+| `Types` | `d0 01 00 00 02 1f 14 16` |
+| `Blobs` | `72 01 00 00 70 1f 21` |
+| `RvaFields` | `d0 01 00 00 04 1a 16` |
+| `FrozenObjects` | `d0 01 00 00 02 1b 16 d0 01 00 00 02 d0 01 00 00 02 1c 16 16` |
+| `ManifestResources` | `20 01 00 00 23 72 03 00 00 70 1d` |
+| `DeduplicatedMethods` | `d0 03 00 00 06 17 d0 04 00 00 06 16` |
+
+These bytes exercise every supported instruction form and record shape. Tests
+also try every truncated file prefix, corrupt opcodes, invalid metadata tokens,
+invalid SerString lengths, deterministic JSON, and 512 arbitrary byte vectors
+per property-test run. The same in-memory `summarize` boundary is exposed to
+the persistent fuzz target.

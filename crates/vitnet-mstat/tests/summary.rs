@@ -1,3 +1,4 @@
+use proptest::prelude::*;
 use vitnet_mstat::summarize;
 
 const FILE_ALIGNMENT: usize = 0x200;
@@ -7,6 +8,7 @@ const METADATA_OFFSET: usize = 0x80;
 struct Fixture {
     bytes: Vec<u8>,
     methods_code_offset: usize,
+    names_offset: usize,
 }
 
 #[test]
@@ -19,7 +21,7 @@ fn summarizes_independently_constructed_v22_fixture() {
     assert_eq!(summary.format_version.minor, 2);
     assert_eq!(summary.assembly, "tiny.mstat");
     assert_eq!(summary.accounted_size_bytes, 66);
-    assert_eq!(summary.mangled_names_bytes, 3);
+    assert_eq!(summary.mangled_names_bytes, 4);
     assert_eq!(summary.categories.len(), 7);
     assert_eq!(summary.categories[0].name, "Methods");
     assert_eq!(summary.categories[0].records, 1);
@@ -69,6 +71,21 @@ fn corrupt_record_opcode_has_a_typed_offset_diagnostic() {
 }
 
 #[test]
+fn rejects_invalid_metadata_tokens_and_serialized_names() {
+    let mut token_fixture = fixture();
+    token_fixture.bytes
+        [token_fixture.methods_code_offset + 1..token_fixture.methods_code_offset + 5]
+        .copy_from_slice(&0_u32.to_le_bytes());
+    let token_error = summarize(&token_fixture.bytes, 1024 * 1024).unwrap_err();
+    assert_eq!(token_error.diagnostic.code, "mstat.token.kind");
+
+    let mut name_fixture = fixture();
+    name_fixture.bytes[name_fixture.names_offset] = 0xff;
+    let name_error = summarize(&name_fixture.bytes, 1024 * 1024).unwrap_err();
+    assert_eq!(name_error.diagnostic.code, "mstat.names.compressed_length");
+}
+
+#[test]
 fn resource_budget_is_enforced_before_mapping_state_is_parsed() {
     let fixture = fixture();
     let error = summarize(&fixture.bytes, 32 * 1024).unwrap_err();
@@ -85,6 +102,15 @@ fn json_representation_is_deterministic_and_versioned() {
         serde_json::to_string(&second).unwrap()
     );
     assert_eq!(first.schema, "vitnet.mstat-summary.v1");
+}
+
+proptest! {
+    #![proptest_config(ProptestConfig::with_cases(512))]
+
+    #[test]
+    fn arbitrary_input_never_panics(data in proptest::collection::vec(any::<u8>(), 0..8192)) {
+        let _ = summarize(&data, 1024 * 1024);
+    }
 }
 
 fn fixture() -> Fixture {
@@ -125,10 +151,14 @@ fn fixture() -> Fixture {
     }
     let metadata = metadata(&strings, &name_offsets, assembly_name, &method_rvas);
     assert_eq!(metadata.len(), placeholder_metadata.len());
+    assert_eq!(metadata.len(), 393);
 
     let text_size = align(relative, FILE_ALIGNMENT);
     let names_raw_offset = FILE_ALIGNMENT + text_size;
+    assert_eq!(bodies_offset, 0x20c);
+    assert_eq!(names_raw_offset, 0x600);
     let mut bytes = vec![0_u8; names_raw_offset + FILE_ALIGNMENT];
+    assert_eq!(bytes.len(), 0x800);
     write_pe_headers(&mut bytes, text_size, names_raw_offset);
     write_cli_header(&mut bytes, metadata.len());
     bytes[FILE_ALIGNMENT + METADATA_OFFSET..FILE_ALIGNMENT + METADATA_OFFSET + metadata.len()]
@@ -146,19 +176,22 @@ fn fixture() -> Fixture {
         }
         body_offset += 1 + body.len();
     }
-    bytes[names_raw_offset..names_raw_offset + 3].copy_from_slice(b"a\0b");
+    bytes[names_raw_offset..names_raw_offset + 4].copy_from_slice(&[1, b'a', 1, b'b']);
 
     Fixture {
         bytes,
         methods_code_offset,
+        names_offset: names_raw_offset,
     }
 }
 
 fn metadata(strings: &[u8], names: &[u32], assembly_name: u32, method_rvas: &[u32; 7]) -> Vec<u8> {
     let tables = tables(names, assembly_name, method_rvas);
-    let root_size = 64;
+    let user_strings = [0_u8, 1, 0, 1, 0];
+    let root_size = 76;
     let strings_offset = root_size + tables.len();
-    let mut bytes = Vec::with_capacity(strings_offset + strings.len());
+    let user_strings_offset = strings_offset + strings.len();
+    let mut bytes = Vec::with_capacity(user_strings_offset + user_strings.len());
     push_u32(&mut bytes, 0x424a_5342);
     push_u16(&mut bytes, 1);
     push_u16(&mut bytes, 1);
@@ -166,16 +199,20 @@ fn metadata(strings: &[u8], names: &[u32], assembly_name: u32, method_rvas: &[u3
     push_u32(&mut bytes, 12);
     bytes.extend_from_slice(b"v4.0.30319\0\0");
     push_u16(&mut bytes, 0);
-    push_u16(&mut bytes, 2);
+    push_u16(&mut bytes, 3);
     push_u32(&mut bytes, as_u32(root_size));
     push_u32(&mut bytes, as_u32(tables.len()));
     bytes.extend_from_slice(b"#~\0\0");
     push_u32(&mut bytes, as_u32(strings_offset));
     push_u32(&mut bytes, as_u32(strings.len()));
     bytes.extend_from_slice(b"#Strings\0\0\0\0");
+    push_u32(&mut bytes, as_u32(user_strings_offset));
+    push_u32(&mut bytes, as_u32(user_strings.len()));
+    bytes.extend_from_slice(b"#US\0");
     assert_eq!(bytes.len(), root_size);
     bytes.extend_from_slice(&tables);
     bytes.extend_from_slice(strings);
+    bytes.extend_from_slice(&user_strings);
     bytes
 }
 
@@ -183,10 +220,11 @@ fn tables(names: &[u32], assembly_name: u32, method_rvas: &[u32; 7]) -> Vec<u8> 
     let mut bytes = Vec::new();
     push_u32(&mut bytes, 0);
     bytes.extend_from_slice(&[2, 0, 0, 1]);
-    let valid = (1_u64 << 0) | (1_u64 << 2) | (1_u64 << 6) | (1_u64 << 32);
+    let valid =
+        (1_u64 << 0) | (1_u64 << 2) | (1_u64 << 4) | (1_u64 << 6) | (1_u64 << 32) | (1_u64 << 35);
     push_u64(&mut bytes, valid);
     push_u64(&mut bytes, 0);
-    for count in [1_u32, 1, 7, 1] {
+    for count in [1_u32, 1, 1, 7, 1, 1] {
         push_u32(&mut bytes, count);
     }
 
@@ -202,6 +240,10 @@ fn tables(names: &[u32], assembly_name: u32, method_rvas: &[u32; 7]) -> Vec<u8> 
     push_u16(&mut bytes, 0);
     push_u16(&mut bytes, 1);
     push_u16(&mut bytes, 1);
+
+    push_u16(&mut bytes, 0);
+    push_u16(&mut bytes, 0);
+    push_u16(&mut bytes, 0);
 
     for (rva, name) in method_rvas.iter().zip(names) {
         push_u32(&mut bytes, *rva);
@@ -221,6 +263,8 @@ fn tables(names: &[u32], assembly_name: u32, method_rvas: &[u32; 7]) -> Vec<u8> 
     push_u16(&mut bytes, 0);
     push_u16(&mut bytes, u16::try_from(assembly_name).unwrap());
     push_u16(&mut bytes, 0);
+
+    bytes.extend_from_slice(&[0; 20]);
     bytes
 }
 
@@ -244,7 +288,7 @@ fn write_pe_headers(bytes: &mut [u8], text_size: usize, names_raw_offset: usize)
     write_u32(bytes, sections + 20, as_u32(FILE_ALIGNMENT));
     let names = sections + 40;
     bytes[names..names + 6].copy_from_slice(b".names");
-    write_u32(bytes, names + 8, 3);
+    write_u32(bytes, names + 8, 4);
     write_u32(bytes, names + 12, 0x4000);
     write_u32(bytes, names + 16, as_u32(FILE_ALIGNMENT));
     write_u32(bytes, names + 20, as_u32(names_raw_offset));
@@ -265,7 +309,7 @@ fn write_cli_header(bytes: &mut [u8], metadata_size: usize) {
 
 fn methods_body() -> Vec<u8> {
     let mut bytes = Vec::new();
-    token(&mut bytes, 0x0a00_0001);
+    token(&mut bytes, 0x0600_0001);
     i4(&mut bytes, 10);
     i4(&mut bytes, 2);
     i4(&mut bytes, 1);
@@ -275,7 +319,7 @@ fn methods_body() -> Vec<u8> {
 
 fn types_body() -> Vec<u8> {
     let mut bytes = Vec::new();
-    token(&mut bytes, 0x0100_0001);
+    token(&mut bytes, 0x0200_0001);
     i4(&mut bytes, 20);
     i4(&mut bytes, 0);
     bytes
@@ -290,7 +334,7 @@ fn blobs_body() -> Vec<u8> {
 
 fn rva_fields_body() -> Vec<u8> {
     let mut bytes = Vec::new();
-    token(&mut bytes, 0x0a00_0002);
+    token(&mut bytes, 0x0400_0001);
     i4(&mut bytes, 4);
     i4(&mut bytes, 0);
     bytes
@@ -298,11 +342,11 @@ fn rva_fields_body() -> Vec<u8> {
 
 fn frozen_objects_body() -> Vec<u8> {
     let mut bytes = Vec::new();
-    token(&mut bytes, 0x0100_0002);
+    token(&mut bytes, 0x0200_0001);
     i4(&mut bytes, 5);
     i4(&mut bytes, 0);
-    token(&mut bytes, 0x0100_0003);
-    token(&mut bytes, 0x0100_0004);
+    token(&mut bytes, 0x0200_0001);
+    token(&mut bytes, 0x0200_0001);
     i4(&mut bytes, 6);
     i4(&mut bytes, 0);
     i4(&mut bytes, 0);
@@ -313,16 +357,16 @@ fn resources_body() -> Vec<u8> {
     let mut bytes = Vec::new();
     i4(&mut bytes, 0x2300_0001);
     bytes.push(0x72);
-    push_u32(&mut bytes, 0x7000_0002);
+    push_u32(&mut bytes, 0x7000_0003);
     i4(&mut bytes, 7);
     bytes
 }
 
 fn deduplicated_body() -> Vec<u8> {
     let mut bytes = Vec::new();
-    token(&mut bytes, 0x0a00_0003);
+    token(&mut bytes, 0x0600_0003);
     i4(&mut bytes, 1);
-    token(&mut bytes, 0x0a00_0004);
+    token(&mut bytes, 0x0600_0004);
     i4(&mut bytes, 0);
     bytes
 }
