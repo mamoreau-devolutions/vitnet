@@ -3,8 +3,10 @@
 mod index;
 
 pub use index::{
-    DgmlCacheInfo, DgmlCachePruneReport, DgmlCacheVerification, DgmlIndexManifest, DgmlIndexReport,
-    IndexControl, IndexFeatures, IndexOptions, build_index, cache_info, prune_cache, verify_cache,
+    BatchReport, DgmlCacheInfo, DgmlCachePruneReport, DgmlCacheVerification, DgmlIndexManifest,
+    DgmlIndexReport, GraphSession, IncomingEdge, IncomingOptions, IncomingReport, IndexControl,
+    IndexFeatures, IndexOptions, SearchMode, SearchOptions, SearchRank, SearchReport, WhyOptions,
+    WhyReport, build_index, cache_info, prune_cache, verify_cache,
 };
 
 use quick_xml::XmlVersion;

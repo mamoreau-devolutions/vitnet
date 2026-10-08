@@ -1,0 +1,88 @@
+{
+  "schemaVersion": 2,
+  "generatedAt": "2026-10-08T15:26:49Z",
+  "title": "Design System: vitnet bounded explorer",
+  "extensions": {
+    "colorMeta": {
+      "accent": { "role": "primary", "displayName": "Measurement teal" },
+      "bg": { "role": "neutral", "displayName": "Cool workspace" },
+      "panel": { "role": "neutral", "displayName": "Evidence surface" },
+      "bar": { "role": "primary", "displayName": "Measured partition" }
+    },
+    "typographyMeta": {
+      "headline": { "displayName": "Report headline", "purpose": "One report title, not a marketing display." },
+      "identity": { "displayName": "Producer identity", "purpose": "Opaque identities and source evidence previews." }
+    },
+    "shadows": [],
+    "motion": [],
+    "breakpoints": [
+      { "name": "stacked-workspace", "value": "950px" },
+      { "name": "compact-page", "value": "600px" }
+    ],
+    "focus": { "outline": "3px solid var(--accent)", "outlineOffset": "3px" }
+  },
+  "components": [
+    {
+      "name": "Evidence action",
+      "kind": "button",
+      "refersTo": "button",
+      "description": "Native bounded-query or inspection action.",
+      "html": "<button class=\"ds-action\">Inspect evidence</button>",
+      "css": ".ds-action{font:inherit;color:var(--ink);background:var(--panel);border:1px solid var(--rule);border-radius:4px;min-height:34px;padding:5px 9px;cursor:pointer}.ds-action:hover{background:var(--accent-soft);border-color:var(--accent)}.ds-action:focus-visible{outline:3px solid var(--accent);outline-offset:3px}"
+    },
+    {
+      "name": "Search input",
+      "kind": "input",
+      "description": "Labelled local search; no remote source fetching.",
+      "html": "<label class=\"ds-field\">Identity substring<input type=\"search\" aria-label=\"Identity substring\"></label>",
+      "css": ".ds-field{display:flex;flex-direction:column;gap:4px;font-size:12px}.ds-field input{font:inherit;color:var(--ink);background:var(--panel);border:1px solid var(--rule);border-radius:4px;min-height:34px;padding:5px 9px}.ds-field input:focus-visible{outline:3px solid var(--accent);outline-offset:3px}"
+    },
+    {
+      "name": "Investigation tab",
+      "kind": "nav",
+      "description": "Compact active view marker.",
+      "html": "<nav class=\"ds-tabs\"><button aria-current=\"page\">Landscape</button><button>Contributors</button></nav>",
+      "css": ".ds-tabs{display:flex;gap:2px;border-bottom:1px solid var(--rule);overflow:auto}.ds-tabs button{font:inherit;color:var(--ink);background:transparent;border:0;border-bottom:2px solid transparent;padding:9px 13px;white-space:nowrap;cursor:pointer}.ds-tabs button[aria-current]{border-bottom-color:var(--accent);color:var(--accent);font-weight:650}.ds-tabs button:hover{background:var(--accent-soft)}.ds-tabs button:focus-visible{outline:3px solid var(--accent);outline-offset:3px}"
+    },
+    {
+      "name": "Mode badge",
+      "kind": "chip",
+      "description": "Inert offline/live status, not a filter.",
+      "html": "<span class=\"ds-badge\">Offline snapshot</span>",
+      "css": ".ds-badge{color:var(--ink);background:var(--bg);border:1px solid var(--rule);border-radius:20px;padding:2px 9px;font-size:11px;overflow-wrap:anywhere}"
+    },
+    {
+      "name": "Evidence pane",
+      "kind": "card",
+      "refersTo": "panel",
+      "description": "Flat companion surface for measurement and caveats.",
+      "html": "<section class=\"ds-pane\"><h2>Inspect a contribution</h2><p>Source candidates and compiler retention are separate evidence.</p></section>",
+      "css": ".ds-pane{color:var(--ink);background:var(--panel);border:1px solid var(--rule);border-radius:5px;padding:20px;min-width:0}.ds-pane h2{font-size:18px;line-height:1.3;font-weight:650;margin:0 0 8px}.ds-pane p{margin:0;font-size:12px;line-height:1.5;color:var(--muted)}"
+    }
+  ],
+  "narrative": {
+    "northStar": "Measurement workbench",
+    "overview": "This records the shipped explorer, not a new visual identity proposal. The surface uses restrained system typography, native controls, quiet rules and compact evidence tables. Measurements lead; the inspector explains a single selection without creating an accumulating history.\n\nProduct truth constrains presentation: ownership, emission and retention must remain distinct. Unknown measurements and partial results are visible states, not decorative zeroes.",
+    "keyCharacteristics": [
+      "Dense, readable measurement tables with tabular numeric alignment.",
+      "Independent investigation and evidence-inspector panes.",
+      "Bounded diagrams with accessible text equivalents.",
+      "Local assets, light/dark system themes and visible keyboard focus."
+    ],
+    "rules": [
+      { "name": "The Labelled Budget Rule", "body": "Color never substitutes for the stream, byte measurement, evidence status or partial-result explanation.", "section": "colors" }
+    ],
+    "dos": [
+      "Do pair every chart with exact values and a text/keyboard equivalent.",
+      "Do preserve unknown, overlapping and partial evidence explicitly.",
+      "Do bound tables and diagrams independently of the original corpus size.",
+      "Do keep native controls, system theme adaptation and visible focus."
+    ],
+    "donts": [
+      "Don't encode contributor bytes with graph degree or equal-size nodes.",
+      "Don't shrink labels to make a whole application graph appear to fit.",
+      "Don't use decorative motion in place of query progress or uncertainty.",
+      "Don't turn path/source text into an executable or arbitrary-file action."
+    ]
+  }
+}

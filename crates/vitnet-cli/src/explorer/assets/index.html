@@ -1,0 +1,60 @@
+<!doctype html>
+<!--
+THESIS: A budgeted measurement workbench, inherited from the explicit task.
+OWN-WORLD: Stream budgets, cache ordinals, evidence generations and bounded
+witness sheets are the tools of this workspace, not a whole-application map.
+STORY: Start with measured bytes; narrow a scope; inspect emission separately
+from retention, overlap and unknowns.
+FIRST VIEWPORT: A compact budget summary above a two-pane investigation:
+measured partitions and tables on the left, evidence and limitations on the right.
+FORM: System fonts, native controls, quiet rules, accessible text equivalents
+and responsive stacking. No concept roll is needed for this precise operate brief.
+Original frontend code is licensed under the repository's MIT license.
+-->
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="light dark">
+  <title>vitnet · bounded explorer</title>
+  <style><!--VITNET_STYLE--></style>
+</head>
+<body>
+  <a class="skip-link" href="#workspace">Skip to investigation</a>
+  <header class="masthead">
+    <div class="brand"><strong>vitnet</strong><span>bounded explorer</span></div>
+    <div class="session-controls">
+      <span id="mode-label" class="badge">Local evidence</span>
+      <button id="cancel-query" type="button" hidden>Cancel query</button>
+      <button id="stop-server" type="button" hidden>Stop server</button>
+    </div>
+  </header>
+  <main>
+    <section class="overview" aria-labelledby="report-title">
+      <h1 id="report-title">Size evidence, without the whole graph</h1>
+      <p id="report-description" class="muted">Methods, Types and Blobs are additive. Source candidates explain emission; small retention witnesses explain compiler reachability, not reclaimable bytes.</p>
+      <div id="budget-summary" class="metrics" aria-label="Measured budgets"></div>
+      <div id="generation-label" class="generation"></div>
+    </section>
+    <div id="query-status" class="status" role="status" aria-live="polite" aria-atomic="true"></div>
+    <div id="error-status" class="error" role="alert" hidden></div>
+    <nav id="tabs" class="tabs" aria-label="Investigation views"></nav>
+    <div id="scope-bar" class="scope-bar" aria-label="Contributor scope"></div>
+    <div id="workspace" class="workspace" tabindex="-1">
+      <section id="investigation" class="panel investigation" aria-labelledby="view-title"></section>
+      <aside id="inspector" class="panel inspector" aria-labelledby="inspector-title"></aside>
+    </div>
+    <footer>
+      <span>Local evidence only · bounded working set · no application code executed</span>
+      <span id="render-budget"></span>
+    </footer>
+  </main>
+  <noscript>This report needs JavaScript to display its bounded evidence. No network connection is required for an exported snapshot.</noscript>
+  <script>
+    const SNAPSHOT = /*VITNET_DATA*/null;
+    const OFFLINE = /*VITNET_OFFLINE*/false;
+    const WORKER_SOURCE = /*VITNET_WORKER*/null;
+    /*VITNET_APP*/
+  </script>
+</body>
+</html>

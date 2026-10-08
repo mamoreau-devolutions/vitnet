@@ -10,6 +10,7 @@ repository.workspace = true
 blake3.workspace = true
 fs4.workspace = true
 fst.workspace = true
+memchr.workspace = true
 quick-xml.workspace = true
 serde.workspace = true
 serde_json.workspace = true
@@ -20,7 +21,12 @@ vitnet-core.workspace = true
 zip.workspace = true
 
 [dev-dependencies]
+criterion.workspace = true
 proptest.workspace = true
+
+[[bench]]
+name = "queries"
+harness = false
 
 [lints]
 workspace = true

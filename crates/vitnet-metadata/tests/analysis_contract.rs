@@ -52,6 +52,8 @@ fn analysis_reports_every_aggregate_strings_unowned_and_lower_bound_semantics() 
             top: 10,
             preview_bytes: 256,
             assembly_filter: None,
+            type_filter: None,
+            contains_filter: None,
         },
     );
 
@@ -173,6 +175,8 @@ fn assembly_filter_keeps_original_record_sizes_without_bridging_excluded_records
             assembly_filter: Some(b"A".to_vec()),
             top: 10,
             preview_bytes: 20,
+            type_filter: None,
+            contains_filter: None,
         },
     );
     assert_eq!(analysis.record_count, 4);
@@ -247,7 +251,7 @@ fn deterministic_top_n_uses_descending_bytes_then_ordinal_name() {
     for _ in 0..10 {
         assert_eq!(top_n(input.clone(), 2), expected);
     }
-    assert!(top_n(input, 0).is_empty());
+    assert_eq!(top_n(input, 0), [] as [vitnet_metadata::Aggregate; 0]);
 }
 
 #[test]
@@ -301,12 +305,15 @@ fn empty_analysis_has_zero_lower_bound_and_empty_sections() {
     assert_eq!(analysis.record_count, 0);
     assert!(analysis.total_is_lower_bound);
     assert!(!analysis.final_record_size_known);
-    assert!(analysis.by_kind.is_empty());
-    assert!(analysis.by_assembly.is_empty());
-    assert!(analysis.by_namespace.is_empty());
-    assert!(analysis.by_type.is_empty());
-    assert!(analysis.largest_strings.is_empty());
-    assert!(analysis.unowned.is_empty());
+    assert_eq!(analysis.by_kind, [] as [vitnet_metadata::Aggregate; 0]);
+    assert_eq!(analysis.by_assembly, [] as [vitnet_metadata::Aggregate; 0]);
+    assert_eq!(analysis.by_namespace, [] as [vitnet_metadata::Aggregate; 0]);
+    assert_eq!(analysis.by_type, [] as [vitnet_metadata::Aggregate; 0]);
+    assert_eq!(
+        analysis.largest_strings,
+        [] as [vitnet_metadata::StringEntry; 0]
+    );
+    assert_eq!(analysis.unowned, [] as [vitnet_metadata::Aggregate; 0]);
     assert!(matches!(
         analysis.limit_status,
         LimitStatus::AtOrBelowHeadroomUnknown {
@@ -373,12 +380,37 @@ fn streaming_analysis_uses_nearest_owner_and_real_producer_scope_kinds() {
 }
 
 #[test]
+fn streaming_string_selection_equals_full_sort_at_all_limits_and_ties() {
+    let input = vec![
+        raw(0, b"String", b"zeta", vec![]),
+        raw(9, b"String", b"alpha", vec![]),
+        raw(18, b"String", b"alpha", vec![]),
+        raw(27, b"String", b"larger", vec![]),
+        raw(42, b"String", b"zero", vec![]),
+    ];
+    let records = metadata_records_from_raw(&input, true).unwrap();
+    for top in 0..=6 {
+        let options = AnalysisOptions {
+            top,
+            preview_bytes: 3,
+            ..Default::default()
+        };
+        let expected = analyze(&records, &options);
+        let report = analyze_stream(input.iter().cloned().map(Ok), options, true, 1 << 20).unwrap();
+        assert_eq!(report.largest_strings, expected.largest_strings);
+        assert_eq!(report.selected_lower_bound, 42);
+        assert_eq!(report.record_count, 5);
+        assert_eq!(report.concentration, expected.concentration);
+        assert!(report.peak_tracked_bytes <= 1 << 20);
+    }
+}
+
+#[test]
 fn streaming_analysis_enforces_the_retained_state_budget() {
     let mut children = Vec::new();
     for value in 1..200 {
         children.push(value);
     }
-
     let error = analyze_stream(
         vec![Ok(raw(0, b"ScopeDefinition", b"A", children))],
         AnalysisOptions::default(),
@@ -386,7 +418,6 @@ fn streaming_analysis_enforces_the_retained_state_budget() {
         1024,
     )
     .unwrap_err();
-
     assert_eq!(error.diagnostic.code, "resource.memory_limit");
     assert!(
         error
@@ -396,6 +427,98 @@ fn streaming_analysis_enforces_the_retained_state_budget() {
             .unwrap()
             .contains("tracked")
     );
+}
+
+#[test]
+fn cohort_selection_uses_resolved_owners_and_concentration_precedes_top() {
+    let input = || {
+        vec![
+            Ok(raw(0, b"ScopeDefinition", b"A", vec![10, 30])),
+            Ok(raw(10, b"TypeDefinition", b"Generated.First", vec![20])),
+            Ok(raw(20, b"String", b"unrelated contents", vec![])),
+            Ok(raw(30, b"TypeDefinition", b"Generated.Second", vec![40])),
+            Ok(raw(40, b"String", b"unrelated contents", vec![])),
+            Ok(raw(60, b"String", b"Generated", vec![])),
+        ]
+    };
+    let options = AnalysisOptions {
+        contains_filter: Some(b"Generated.".to_vec()),
+        top: 1,
+        ..Default::default()
+    };
+    let report = analyze_stream(input(), options.clone(), true, 1 << 20).unwrap();
+    assert_eq!(report.observed_lower_bound, 60);
+    assert_eq!(report.selected_lower_bound, 50);
+    assert_eq!(report.record_count, 4);
+    assert_eq!(report.by_type[0].name, "A!Generated.Second");
+    let coverage = &report.concentration["by_type"];
+    assert_eq!(coverage.total_bytes, 50);
+    assert_eq!(coverage.reported_bytes, 30);
+    assert_eq!(coverage.omitted_bytes, 20);
+    assert_eq!(coverage.total_groups, 2);
+    assert_eq!(coverage.reported_share_basis_points, 6000);
+    let raw = input().into_iter().map(Result::unwrap).collect::<Vec<_>>();
+    let records = vitnet_metadata::metadata_records_from_raw(&raw, true).unwrap();
+    let expected = vitnet_metadata::analyze(&records, &options);
+    assert_eq!(report.concentration, expected.concentration);
+    assert_eq!(report.selected_lower_bound, expected.selected_lower_bound);
+    let empty = analyze_stream(
+        input(),
+        AnalysisOptions {
+            contains_filter: Some(b"no such owner".to_vec()),
+            ..Default::default()
+        },
+        true,
+        1 << 20,
+    )
+    .unwrap();
+    assert_eq!(empty.selected_lower_bound, 0);
+    assert_eq!(
+        empty.concentration["by_type"].reported_share_basis_points,
+        0
+    );
+    assert_eq!(empty.concentration["by_type"].total_groups, 0);
+}
+
+#[test]
+fn selection_distinguishes_repeated_changed_and_unowned_contexts() {
+    let input = vec![
+        raw(0, b"ScopeDefinition", b"A", vec![10, 30]),
+        raw(10, b"TypeDefinition", b"Alpha", vec![20, 25]),
+        raw(20, b"String", b"contents", vec![]),
+        raw(25, b"String", b"contents", vec![]),
+        raw(30, b"TypeDefinition", b"Beta", vec![40]),
+        raw(40, b"String", b"Alpha contents", vec![]),
+        raw(50, b"ScopeDefinition", b"Other", vec![60]),
+        raw(60, b"TypeDefinition", b"Alpha", vec![70]),
+        raw(70, b"String", b"contents", vec![]),
+        raw(80, b"String", b"Alpha unowned", vec![]),
+    ];
+    for (assembly, type_name, bytes, count) in [
+        (None, None, 40, 5),
+        (Some(b"A".to_vec()), None, 20, 3),
+        (None, Some(b"A!Alpha".to_vec()), 20, 3),
+        (Some(b"Other".to_vec()), Some(b"A!Alpha".to_vec()), 0, 0),
+    ] {
+        let report = analyze_stream(
+            input.iter().cloned().map(Ok),
+            AnalysisOptions {
+                assembly_filter: assembly,
+                type_filter: type_name,
+                contains_filter: Some(b"Alpha".to_vec()),
+                ..Default::default()
+            },
+            true,
+            1 << 20,
+        )
+        .unwrap();
+        assert_eq!(report.observed_lower_bound, 80);
+        assert_eq!(report.observed_record_count, 10);
+        assert_eq!(report.selected_lower_bound, bytes);
+        assert_eq!(report.record_count, count);
+        assert_eq!(report.concentration["by_type"].total_bytes, bytes);
+        assert_eq!(report.unowned.len(), 0);
+    }
 }
 
 #[test]
@@ -493,14 +616,15 @@ fn streaming_analysis_detects_legacy_layout_and_uses_legacy_limit() {
 }
 
 #[test]
-fn streaming_analysis_joins_namespace_segments_without_reprefixing_type_names() {
+fn streaming_analysis_preserves_producer_qualified_names() {
     let analysis = analyze_stream(
         vec![
             Ok(raw(0, b"ScopeDefinition", b"A", vec![10])),
             Ok(raw(10, b"NamespaceDefinition", b"", vec![20])),
             Ok(raw(20, b"NamespaceDefinition", b"System", vec![30])),
-            Ok(raw(30, b"TypeDefinition", b"System.String", vec![40])),
-            Ok(raw(40, b"Method", b"M", vec![])),
+            Ok(raw(30, b"NamespaceDefinition", b"System.Text", vec![40])),
+            Ok(raw(40, b"TypeDefinition", b"System.Text.Builder", vec![50])),
+            Ok(raw(50, b"Method", b"M", vec![])),
         ],
         AnalysisOptions::default(),
         true,
@@ -518,11 +642,23 @@ fn streaming_analysis_joins_namespace_segments_without_reprefixing_type_names() 
         analysis
             .by_type
             .iter()
-            .any(|entry| entry.name == "A!System.String")
+            .any(|entry| entry.name == "A!System.Text.Builder")
     );
     assert!(
         analysis
             .by_type
+            .iter()
+            .all(|entry| !entry.name.contains("System.System"))
+    );
+    assert!(
+        analysis
+            .by_namespace
+            .iter()
+            .any(|entry| entry.name == "System.Text")
+    );
+    assert!(
+        analysis
+            .by_namespace
             .iter()
             .all(|entry| !entry.name.contains("System.System"))
     );

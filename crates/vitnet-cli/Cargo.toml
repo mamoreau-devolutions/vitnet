@@ -10,6 +10,10 @@ name = "vitnet"
 path = "src/main.rs"
 
 [dependencies]
+blake3.workspace = true
+getrandom = "0.3"
+httparse = "1"
+tempfile.workspace = true
 ctrlc.workspace = true
 clap.workspace = true
 serde_json.workspace = true
@@ -20,9 +24,15 @@ vitnet-dgml.workspace = true
 vitnet-metadata.workspace = true
 vitnet-mstat.workspace = true
 vitnet-report.workspace = true
+vitnet-attribution.workspace = true
 
 [target.'cfg(windows)'.dependencies]
 mimalloc.workspace = true
+bytes = "1"
+http-body-util = "0.1"
+hyper = { version = "1", features = ["client", "http1", "server"] }
+hyper-util = { version = "0.1", features = ["tokio"] }
+tokio = { version = "1", features = ["io-util", "net", "rt", "sync", "time"] }
 
 [dev-dependencies]
 tempfile = "3.27"

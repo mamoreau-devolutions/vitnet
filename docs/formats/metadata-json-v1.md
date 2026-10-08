@@ -42,6 +42,23 @@ by descending bytes, then ordinal display name. String entries add
 `logical_offset`, `bytes`, and a preview with `text`, `original_bytes`, and
 `truncated`.
 
+Assembly/type/ownership-substring filters affect `record_count`, selected bytes and attributed
+sections, but not `observed_record_count` or the whole-input lower bound.
+`--type` matches the complete assembly-prefixed type key; it intersects
+`--assembly`. `--preview-bytes` truncates display only, not matching/accounting.
+`--contains` matches a literal case-sensitive substring in the resolved
+assembly, namespace or owning type; it intersects the exact filters. An
+unowned string matching the literal does not thereby gain ownership.
+
+The additive `sections.concentration` object contains `by_kind`, `by_assembly`,
+`by_namespace`, `by_type`, and `unowned` coverage entries. Each has
+`total_bytes`, `reported_bytes`, `omitted_bytes`, `total_groups`,
+`reported_groups`, and `reported_share_basis_points`. Totals precede top-N;
+reported plus omitted bytes equal total bytes. Basis points are integer
+floor division (`reported * 10000 / total`), or zero for an empty dimension.
+Each dimension describes the same selected metadata, not additive new bytes.
+Older v1 JSON without this optional field remains readable.
+
 `producer_offset_bits` is 24 for legacy logs and 25 for current logs. When the
 observed start exceeds the matching format limit, `limit_status` is
 `over_by_at_least` and includes the conservative `bytes` overage. At or below

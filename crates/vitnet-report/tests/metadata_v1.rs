@@ -123,6 +123,9 @@ fn comparison_v1_is_versioned_signed_reconciled_and_truncatable() {
     assert_eq!(comparison.sections.unowned.total_delta, 0);
 
     comparison.truncate(0);
-    assert!(comparison.sections.by_kind.entries.is_empty());
+    assert_eq!(
+        comparison.sections.by_kind.entries,
+        [] as [vitnet_metadata::ComparisonEntry; 0]
+    );
     assert_eq!(comparison.sections.by_kind.total_delta, 5);
 }

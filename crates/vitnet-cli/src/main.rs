@@ -19,6 +19,7 @@ fn main() {
     }
     let cancellation = control.clone();
     if matches!(&cli.command, Command::Dgml(arguments) if matches!(arguments.command, DgmlCommand::Index { .. }))
+        || matches!(&cli.command, Command::Explore(_))
     {
         if let Err(error) = ctrlc::set_handler(move || cancellation.cancel()) {
             eprintln!("io.signal_handler: {error}");

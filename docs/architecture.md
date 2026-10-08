@@ -12,6 +12,41 @@ and stable serialization:
 - `vitnet-dgml`: pull-based NativeAOT DGML statistics and bounded external-memory
   immutable graph indexing.
 - `vitnet-cli`: argument validation, input selection, and report projection.
+- `vitnet-attribution`: versioned evidence import, full coalesced identity cache,
+  source/package/generator/shape/asset reports, generation-bound witness
+  annotations and separate physical/logical controlled-build comparisons.
+- `tools\vitnet-evidence`: optional read-only local .NET collector for Roslyn
+  syntax, structured build logs, assets, managed PE, portable PDBs and supported
+  resource containers. Queries remain Rust-only after capture and import.
+
+See the [attribution workflow](attribution.md) for snapshot integrity, bounded
+processing and the distinction between asserted, exact-resource and
+opaque-name-candidate associations. The collector never evaluates/builds the
+analyzed project, runs generators, loads application assemblies or downloads
+source documents.
+
+## Visual explorer
+
+`vitnet-cli::explorer` projects existing attribution and DGML indexes into a
+bounded browser workspace. Preparation streams the verified identity cache
+once, builds complete aggregates and a compact ordinal-to-offset sidecar, then
+atomically publishes a new bundle. It references rather than duplicates the
+original identities/graphs. Snapshot and original-index fingerprints bind the
+prepared projection to its generation.
+
+Offline HTML embeds bounded evidence and dependency-free assets. The live
+loopback server returns the same snapshot only after authenticated JSON POST
+bootstrap; its public shell contains no private evidence. Random session
+capabilities and CSP nonces are independent. Exact Host/Origin checks, framing
+and response budgets, four connections, and one expensive query bound transport
+work. The original named-pipe daemon is independent and unchanged.
+
+Row queries seek through the offset sidecar and filter complete identities;
+source matching stays in Rust. Graph queries reuse generation-locked
+`GraphSession` readers with cooperative cancellation. Browser page replacement,
+sequence guards, bounded worker layout and a 200-node/500-edge sheet prevent
+unbounded rendering/history. See [explorer.md](explorer.md) for the public
+commands, evidence semantics, integrity and resource contracts.
 
 ## Streaming path
 
@@ -50,10 +85,12 @@ receives its nearest prior owner context. A later reference replaces an earlier
 one; equal-position references prefer the deeper context. This gives stable
 nearest/deepest duplicate-handle behavior without an object graph.
 
-`ScopeDefinition` names identify assemblies. `NamespaceDefinition` names are
-segments and are joined through parent contexts. `TypeDefinition` names are
-already namespace/nesting-qualified by the producer; vitnet prefixes only the
-assembly (`Assembly!Type`) to prevent cross-assembly collisions.
+`ScopeDefinition` names identify assemblies. `NamespaceDefinition` and
+`TypeDefinition` display names are already namespace/nesting-qualified by the
+producer. vitnet interns the namespace directly and prefixes only the assembly
+on type keys (`Assembly!Type`) to prevent cross-assembly collisions. Exact type
+and assembly filters select attribution after propagation, not the rows used
+to derive sizes.
 
 ## Lower-bound accounting
 
@@ -130,8 +167,7 @@ is never unlinked, avoiding split-lock races.
 Readers keep a shared cache lock for their entire operation; builders/pruners
 fail explicitly if the cache is in use. This conservative policy avoids
 generation deletion races without pretending to support simultaneous
-publication and readers yet. Phase 5 must retain equivalent lifetime protection
-for query readers.
+publication and readers yet. Query sessions retain the same lifetime protection.
 
 Cancellation is checked between XML batches, sort runs, merge batches, hash
 chunks, and before publication. Phase callbacks are opt-in and sent to stderr
@@ -140,6 +176,25 @@ errors/cancellation; forced process termination leaves a hidden build for
 `cache prune`. Input size, modification time, and prefix/suffix fingerprint
 are rechecked before publication; strict mode also repeats the full input hash.
 Filesystem/I/O failures remain explicit.
+
+### Bounded query sessions
+
+`GraphSession` holds two 1 MiB label/node readers, three 64 KiB CSR/edge/reason
+readers, one reused bounded search-label buffer, and a shared generation
+lock. Opening validates required file shapes, not every payload checksum:
+`cache verify` remains the explicit full integrity operation. Numeric lookup
+seeks directly to one node and its CSR range. Text search scans complete labels
+sequentially with numeric keyset pagination and generation guards. It does not
+map/load the label FST. Incoming BFS retains bounded compact visits and reason
+ranges, rendering labels/reasons only for selected shortest witnesses. Cycles,
+missing sources and partial traversal stops remain visible in the report.
+
+The optional Windows HTTP-over-named-pipe daemon retains at most two sessions.
+Its LRU evicts readers/locks; it does not retain graph rows or cache unbounded
+query responses. Windows pipe remote clients are rejected; no network listener
+is opened. Request/response and connection limits complement query resource
+limits. This is useful for repeated tiny seeks, not a substitute for indexing
+or a guarantee that bulk label scans become faster.
 
 ### Turso evaluation
 
@@ -190,3 +245,9 @@ compared after a fingerprint match, including collision cases. Top-N output is
 bounded and deterministic by absolute delta, signed delta, then identity.
 Only selected display identities are allocated. Accounted section deltas are
 checked against the overall signed delta before a report is returned.
+
+Top mode uses one checked compact inventory, sorts/coalesces exact identities,
+and selects bounded ranked entries while preserving whole-stream totals.
+Case-sensitive substring filters use UTF-8 for names and aligned UTF-16 for
+`#US` resource/blob strings. Internal resource identity bytes remain unchanged;
+presentation separates the assembly prefix and UTF-16 resource suffix.

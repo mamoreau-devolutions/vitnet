@@ -15,6 +15,12 @@ use std::sync::{
 use std::time::{SystemTime, UNIX_EPOCH};
 use sysinfo::{Pid, System};
 
+mod query;
+pub use query::{
+    BatchReport, GraphSession, IncomingEdge, IncomingOptions, IncomingReport, SearchMode,
+    SearchOptions, SearchRank, SearchReport, WhyOptions, WhyReport,
+};
+
 const INDEX_SCHEMA: &str = "vitnet.dgml-index.v1";
 const NODE_RECORD_SIZE: u64 = 16;
 const EDGE_RECORD_SIZE: usize = 32;
@@ -43,6 +49,11 @@ pub struct IndexControl {
 }
 
 impl IndexControl {
+    #[must_use]
+    pub fn is_cancelled(&self) -> bool {
+        self.cancelled.load(Ordering::Acquire)
+    }
+
     pub fn cancel(&self) {
         self.cancelled.store(true, Ordering::Release);
     }
@@ -2311,7 +2322,7 @@ mod tests {
         refill_owned_label(&mut input, &mut record).unwrap();
         let label = record.as_ref().unwrap();
         assert_eq!(label.node_id, 1);
-        assert!(label.value.is_empty());
+        assert_eq!(label.value, [] as [u8; 0]);
         assert_eq!(label.value.as_ptr(), pointer);
         refill_owned_label(&mut input, &mut record).unwrap();
         assert!(record.is_none());

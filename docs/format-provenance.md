@@ -3,6 +3,19 @@
 vitnet is a clean-room implementation. Sizoscope source, tests, fixtures,
 comments, caches, and internal design are not inputs.
 
+## Optional build/source evidence
+
+The versioned `vitnet.evidence.v1` interchange and
+`vitnet.attribution-index.v1` persistence are independently designed formats.
+The [collector documentation](evidence-collector.md#licenses-and-format-provenance)
+records exact Roslyn/MSBuild/runtime package versions, official source commits
+and the pinned public Avalonia resource-index producer definition. All collector
+NuGet dependencies are stable, lockfile-pinned and checked for approved
+permissive license expressions by `tools\vitnet-evidence\check-policy.ps1`.
+No application assemblies are loaded or generators executed during collection.
+Source declarations are syntax evidence; name-derived ownership is a labelled
+candidate, not a demangled compiler contract.
+
 ## NativeAOT metadata log (Phase 1)
 
 The current pinned baseline is
@@ -25,6 +38,10 @@ the evidence used by this implementation.
   quotes bypass escaping under an explicit producer TODO. The decoder therefore
   supports producer escaping, embedded newlines, and doubled quotes without
   assuming the file is strict RFC 4180 CSV.
+- [`NamespaceDefinition.ToString(false)` and type display names](https://github.com/dotnet/runtime/blob/496f6f80ad5e02db89f238f2db288e53176b9027/src/coreclr/tools/aot/ILCompiler.MetadataTransform/Internal/Metadata/NativeFormat/Writer/NativeMetadataWriter.cs)
+  already include qualified ancestors. Namespace labels must not be joined
+  again through ownership contexts. An independently generated nested-namespace
+  regression verifies this without a private fixture.
 - [Current handle extraction](https://github.com/dotnet/runtime/blob/496f6f80ad5e02db89f238f2db288e53176b9027/src/coreclr/tools/aot/ILCompiler.MetadataTransform/Internal/Metadata/NativeFormat/Writer/NativeMetadataWriter.cs#L517-L532)
   masks the writer offset with `0x01FFFFFF`. The
   [current handle constructor](https://github.com/dotnet/runtime/blob/496f6f80ad5e02db89f238f2db288e53176b9027/src/coreclr/tools/Common/Internal/Metadata/NativeFormat/NativeMetadataReader.cs#L107-L120)
@@ -108,6 +125,35 @@ MSTAT parsing is derived from these public producer contracts and ECMA-335 PE
 metadata rules. Local large-file validation does not contribute private names,
 tokens, or fixture bytes to the repository.
 
+### Logical object sizes versus physical file bytes
+
+The same pinned commit also establishes an important interpretation limit:
+
+- [`ObjectDumper.cs`](https://github.com/dotnet/runtime/blob/2eb7113245f7c536ab876dca5e3533fb96c81bbf/src/coreclr/tools/aot/ILCompiler.Compiler/Compiler/ObjectDumper.cs)
+  derives blob bucket names from node-class names, removing the generic suffix
+  and trailing `Node`. A bucket is a producer node kind, not package ownership.
+- [`ObjectWriter.cs`](https://github.com/dotnet/runtime/blob/2eb7113245f7c536ab876dca5e3533fb96c81bbf/src/coreclr/tools/Common/Compiler/ObjectWriter/ObjectWriter.cs)
+  sends `GetData` object contents to the dumper before section emission.
+- [`DehydratableObjectNode.cs`](https://github.com/dotnet/runtime/blob/2eb7113245f7c536ab876dca5e3533fb96c81bbf/src/coreclr/tools/aot/ILCompiler.Compiler/Compiler/DependencyAnalysis/DehydratableObjectNode.cs)
+  chooses a hydration-target section for applicable nodes when dehydration is
+  active.
+- [`MetadataManager.cs`, lines 114-122](https://github.com/dotnet/runtime/blob/2eb7113245f7c536ab876dca5e3533fb96c81bbf/src/coreclr/tools/aot/ILCompiler.Compiler/Compiler/MetadataManager.cs#L114-L122)
+  preserves the original logical length in a zero-filled object data array
+  while retaining the original contents for dehydration.
+- [`ObjectNodeSection.cs`](https://github.com/dotnet/runtime/blob/2eb7113245f7c536ab876dca5e3533fb96c81bbf/src/coreclr/tools/Common/Compiler/DependencyAnalysis/ObjectNodeSection.cs)
+  declares the hydration-target section as uninitialized.
+- [`DehydratedDataNode.cs`](https://github.com/dotnet/runtime/blob/2eb7113245f7c536ab876dca5e3533fb96c81bbf/src/coreclr/tools/aot/ILCompiler.Compiler/Compiler/DependencyAnalysis/DehydratedDataNode.cs)
+  emits a separate encoded stream of literal bytes, zero runs and relocations.
+  Its relocation-only data is empty; it is a summary node rather than an
+  ordinary graph contributor.
+
+Consequently, Methods + Types + Blobs is exact **reported object accounting**,
+not a physical executable-section sum or predicted disk savings. In particular,
+logical hydration targets and the dehydrated representation cannot be treated
+as independent physically removable payloads. Disabling dehydration is not a
+size-removal recommendation. Physical comparisons require the actual binary's
+file/section sizes, alongside same-configuration MSTAT and dependency evidence.
+
 Tests construct a minimal PE/CLI metadata image and all seven record streams
 independently in Rust. `mmap-guard` is MIT OR Apache-2.0 licensed and provides
 the safe read-only mapping boundary used by the unsafe-code-forbidden
@@ -152,7 +198,34 @@ to the permissively licensed `zip` crate. XML labels/reasons are UTF-8 and
 follow XML 1.0 character constraints; NUL is rejected rather than confused
 with the independently chosen FST key separator.
 
+Root labels come from `rootName`, not a universal literal `Root`.
+`VisitEdge(string root, dependedOn)` writes an empty/null reason. Conditional
+links use `Primary` and `Secondary` from the two prerequisites to a combined
+node, then the dependency reason to the target. See the
+[same pinned writer](https://github.com/dotnet/runtime/blob/2eb7113245f7c536ab876dca5e3533fb96c81bbf/src/coreclr/tools/aot/ILCompiler.DependencyAnalysisFramework/DgmlWriter.cs).
+Bounded query witnesses preserve this evidence but do not treat a single
+conditional path as sufficient cause or structural zero-in-degree as a
+producer-proven root.
+
+## User-authorized architecture inspiration
+
+At the user's request, conceptual inspiration for bounded evidence capture and
+HTTP-over-Windows-named-pipe transport came from
+[`Devolutions/windbg-tool@b4b9dafc23c94496643dab2430780be3c1647286`](https://github.com/Devolutions/windbg-tool/tree/b4b9dafc23c94496643dab2430780be3c1647286),
+particularly `crates/windbg-ttd/src/daemon.rs`. The user identified themselves as
+the author and expressly authorized code use. No source was copied or vendored;
+vitnet's bounded graph-session transport and schemas are independently written.
+No license grant is inferred from the repository's missing license declaration.
+
 ## Evidence maintenance
+
+The component insight reports reuse the pinned MSTAT field contracts above:
+method body/GC/EH fields, exact AssemblyRef name/culture, UTF-16 user strings,
+and opaque `.names` identities. First-`<` families, literal cohort rules,
+coverage projections and graph query schemas are independent vitnet analysis
+designs, not additional producer format claims. Exact-name `Metadata` blob
+counts are observations; reconciliation does not assert that independently
+supplied files come from the same build.
 
 Before changing a non-obvious format rule, record the public Microsoft runtime
 producer path, commit hash, relevant lines, and an independently generated

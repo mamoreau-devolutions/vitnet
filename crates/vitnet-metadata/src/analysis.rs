@@ -22,6 +22,8 @@ pub struct MetadataRecord {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct AnalysisOptions {
     pub assembly_filter: Option<Vec<u8>>,
+    pub type_filter: Option<Vec<u8>>,
+    pub contains_filter: Option<Vec<u8>>,
     pub top: usize,
     pub preview_bytes: usize,
 }
@@ -30,10 +32,59 @@ impl Default for AnalysisOptions {
     fn default() -> Self {
         Self {
             assembly_filter: None,
+            type_filter: None,
+            contains_filter: None,
             top: 50,
             preview_bytes: 256,
         }
     }
+}
+
+impl AnalysisOptions {
+    fn filtered(&self) -> bool {
+        self.assembly_filter.is_some()
+            || self.type_filter.is_some()
+            || self.contains_filter.is_some()
+    }
+}
+
+#[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
+pub struct Concentration {
+    pub total_bytes: u64,
+    pub reported_bytes: u64,
+    pub omitted_bytes: u64,
+    pub total_groups: usize,
+    pub reported_groups: usize,
+    pub reported_share_basis_points: u64,
+}
+
+fn concentration(total: u64, groups: usize, entries: &[Aggregate]) -> Concentration {
+    let reported = entries.iter().map(|entry| entry.bytes).sum::<u64>();
+    Concentration {
+        total_bytes: total,
+        reported_bytes: reported,
+        omitted_bytes: total - reported,
+        total_groups: groups,
+        reported_groups: entries.len(),
+        reported_share_basis_points: if total == 0 {
+            0
+        } else {
+            u64::try_from(u128::from(reported) * 10_000 / u128::from(total)).unwrap()
+        },
+    }
+}
+
+fn contains_context(
+    filter: &[u8],
+    values: impl IntoIterator<Item = Option<impl AsRef<[u8]>>>,
+) -> bool {
+    values.into_iter().flatten().any(|value| {
+        filter.is_empty()
+            || value
+                .as_ref()
+                .windows(filter.len())
+                .any(|part| part == filter)
+    })
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -89,6 +140,8 @@ pub struct Analysis {
     pub unowned: Vec<Aggregate>,
     pub limit_status: LimitStatus,
     pub peak_tracked_bytes: u64,
+    #[serde(default)]
+    pub concentration: BTreeMap<String, Concentration>,
 }
 
 #[must_use]
@@ -283,6 +336,7 @@ pub struct StreamingAnalyzer {
     by_type: HashMap<u32, Counter>,
     unowned: HashMap<u32, Counter>,
     strings: Vec<StringEntry>,
+    string_charge: u64,
     pending: Option<PendingRecord>,
     record_count: u64,
     selected_record_count: u64,
@@ -320,6 +374,7 @@ impl StreamingAnalyzer {
             by_type: HashMap::new(),
             unowned: HashMap::new(),
             strings: Vec::new(),
+            string_charge: 0,
             pending: None,
             record_count: 0,
             selected_record_count: 0,
@@ -360,7 +415,7 @@ impl StreamingAnalyzer {
                     resource_error("metadata.offset.invariant", "logical offsets decreased")
                 })?;
             self.finish_record(previous, bytes);
-        } else if self.options.assembly_filter.is_none() && normalized.logical > 0 {
+        } else if !self.options.filtered() && normalized.logical > 0 {
             let prefix = self.kinds.intern(b"(metadata prefix)");
             add_bytes(&mut self.by_kind, prefix, normalized.logical, 0);
             add_bytes(&mut self.unowned, prefix, normalized.logical, 0);
@@ -380,12 +435,7 @@ impl StreamingAnalyzer {
                 };
             }
             2 => {
-                let namespace = qualify(
-                    context.namespace.map(|index| self.identifiers.get(index)),
-                    &record.name,
-                    b".",
-                );
-                context.namespace = Some(self.identifiers.intern(&namespace));
+                context.namespace = Some(self.identifiers.intern(&record.name));
                 context.type_name = None;
             }
             3 => {
@@ -417,11 +467,7 @@ impl StreamingAnalyzer {
             }
         }
 
-        let selected = self.options.assembly_filter.as_ref().is_none_or(|filter| {
-            context
-                .assembly
-                .is_some_and(|index| self.identifiers.get(index) == filter)
-        });
+        let selected = self.selected(context);
         let string_preview = (selected && is_string_kind(&record.kind))
             .then(|| preview_bytes(&record.name, self.options.preview_bytes));
         let kind = self.kinds.intern(&record.kind);
@@ -443,6 +489,24 @@ impl StreamingAnalyzer {
         })
     }
 
+    fn selected(&self, context: Context) -> bool {
+        self.options.assembly_filter.as_ref().is_none_or(|filter| {
+            context
+                .assembly
+                .is_some_and(|index| self.identifiers.get(index) == filter)
+        }) && self.options.type_filter.as_ref().is_none_or(|filter| {
+            context
+                .type_name
+                .is_some_and(|index| self.identifiers.get(index) == filter)
+        }) && self.options.contains_filter.as_ref().is_none_or(|filter| {
+            contains_context(
+                filter,
+                [context.assembly, context.namespace, context.type_name]
+                    .map(|index| index.map(|index| self.identifiers.get(index))),
+            )
+        })
+    }
+
     fn finish_record(&mut self, record: PendingRecord, bytes: u64) {
         if !record.selected {
             return;
@@ -461,13 +525,24 @@ impl StreamingAnalyzer {
             add_counter(&mut self.unowned, record.kind, bytes);
         }
         if let Some(preview) = record.string_preview {
-            self.strings.push(StringEntry {
+            let entry = StringEntry {
                 preview,
                 bytes,
                 logical_offset: record.logical_offset,
-            });
-            self.strings.sort_by(compare_strings);
-            self.strings.truncate(self.options.top);
+            };
+            let position = self
+                .strings
+                .partition_point(|retained| compare_strings(retained, &entry).is_le());
+            if position >= self.options.top {
+                return;
+            }
+            if self.strings.len() == self.options.top
+                && let Some(removed) = self.strings.pop()
+            {
+                self.string_charge -= removed.preview.text.len() as u64 + 64;
+            }
+            self.string_charge += entry.preview.text.len() as u64 + 64;
+            self.strings.insert(position, entry);
         }
     }
 
@@ -485,12 +560,7 @@ impl StreamingAnalyzer {
                     + self.unowned.len()) as u64
                     * 32,
             )
-            .saturating_add(
-                self.strings
-                    .iter()
-                    .map(|entry| entry.preview.text.len() as u64 + 64)
-                    .sum(),
-            );
+            .saturating_add(self.string_charge);
         // Hash tables, allocators, and temporary decode fields have
         // implementation-dependent overhead. A 2x charge keeps the configured
         // limit conservative instead of presenting a false RSS guarantee.
@@ -522,11 +592,47 @@ impl StreamingAnalyzer {
             self.finish_record(last, 0);
         }
         let total = self.observed_lower_bound;
-        let selected = if self.options.assembly_filter.is_some() {
+        let selected = if self.options.filtered() {
             self.selected_lower_bound
         } else {
             total
         };
+        let sections = [
+            ("by_kind", &self.by_kind, &self.kinds, usize::MAX),
+            (
+                "by_assembly",
+                &self.by_assembly,
+                &self.identifiers,
+                self.aggregate_limit,
+            ),
+            (
+                "by_namespace",
+                &self.by_namespace,
+                &self.identifiers,
+                self.aggregate_limit,
+            ),
+            (
+                "by_type",
+                &self.by_type,
+                &self.identifiers,
+                self.aggregate_limit,
+            ),
+            ("unowned", &self.unowned, &self.kinds, self.aggregate_limit),
+        ];
+        let mut coverage = BTreeMap::new();
+        let [by_kind, by_assembly, by_namespace, by_type, unowned] =
+            sections.map(|(name, values, interner, limit)| {
+                let entries = aggregates(values, interner, limit);
+                coverage.insert(
+                    name.into(),
+                    concentration(
+                        values.values().map(|value| value.bytes).sum(),
+                        values.len(),
+                        &entries,
+                    ),
+                );
+                entries
+            });
         Analysis {
             offset_bits: self.normalizer.offset_bits(),
             observed_lower_bound: total,
@@ -536,14 +642,15 @@ impl StreamingAnalyzer {
             final_record_size_known: false,
             observed_record_count: self.record_count,
             record_count: self.selected_record_count,
-            by_kind: aggregates(&self.by_kind, &self.kinds, usize::MAX),
-            by_assembly: aggregates(&self.by_assembly, &self.identifiers, self.aggregate_limit),
-            by_namespace: aggregates(&self.by_namespace, &self.identifiers, self.aggregate_limit),
-            by_type: aggregates(&self.by_type, &self.identifiers, self.aggregate_limit),
+            by_kind,
+            by_assembly,
+            by_namespace,
+            by_type,
             largest_strings: self.strings,
-            unowned: aggregates(&self.unowned, &self.kinds, self.aggregate_limit),
+            unowned,
             limit_status: limit_status(total, self.normalizer.limit()),
             peak_tracked_bytes: self.peak_tracked_bytes,
+            concentration: coverage,
         }
     }
 }
@@ -600,6 +707,7 @@ where
 }
 
 #[must_use]
+#[allow(clippy::too_many_lines)]
 pub fn analyze(records: &[MetadataRecord], options: &AnalysisOptions) -> Analysis {
     let offsets = records
         .iter()
@@ -614,6 +722,17 @@ pub fn analyze(records: &[MetadataRecord], options: &AnalysisOptions) -> Analysi
                 .assembly_filter
                 .as_ref()
                 .is_none_or(|assembly| record.assembly.as_ref() == Some(assembly))
+                && options
+                    .type_filter
+                    .as_ref()
+                    .is_none_or(|name| record.type_name.as_ref() == Some(name))
+                && options.contains_filter.as_ref().is_none_or(|filter| {
+                    contains_context(
+                        filter,
+                        [&record.assembly, &record.namespace, &record.type_name]
+                            .map(Option::as_deref),
+                    )
+                })
         })
         .collect::<Vec<_>>();
 
@@ -645,7 +764,7 @@ pub fn analyze(records: &[MetadataRecord], options: &AnalysisOptions) -> Analysi
             });
         }
     }
-    if options.assembly_filter.is_none()
+    if !options.filtered()
         && let Some(prefix_bytes) = offsets.first().copied().filter(|value| *value > 0)
     {
         kinds.insert("(metadata prefix)".into(), (prefix_bytes, 0));
@@ -655,11 +774,26 @@ pub fn analyze(records: &[MetadataRecord], options: &AnalysisOptions) -> Analysi
     strings.sort_by(compare_strings);
     strings.truncate(options.top);
     let total = sizes.total_lower_bound;
-    let selected_total = if options.assembly_filter.is_some() {
+    let selected_total = if options.filtered() {
         selected.iter().map(|(_, bytes)| **bytes).sum()
     } else {
         total
     };
+    let mut coverage = BTreeMap::new();
+    let [by_kind, by_assembly, by_namespace, by_type, unowned] = [
+        ("by_kind", kinds, usize::MAX),
+        ("by_assembly", assemblies, options.top),
+        ("by_namespace", namespaces, options.top),
+        ("by_type", types, options.top),
+        ("unowned", unowned, options.top),
+    ]
+    .map(|(name, values, limit)| {
+        let total = values.values().map(|value| value.0).sum();
+        let groups = values.len();
+        let entries = top_n(to_aggregates(values), limit);
+        coverage.insert(name.into(), concentration(total, groups, &entries));
+        entries
+    });
     Analysis {
         offset_bits: CURRENT_OFFSET_BITS,
         observed_lower_bound: total,
@@ -669,14 +803,15 @@ pub fn analyze(records: &[MetadataRecord], options: &AnalysisOptions) -> Analysi
         final_record_size_known: sizes.final_record_exact,
         observed_record_count: records.len() as u64,
         record_count: selected.len() as u64,
-        by_kind: top_n(to_aggregates(kinds), usize::MAX),
-        by_assembly: top_n(to_aggregates(assemblies), options.top),
-        by_namespace: top_n(to_aggregates(namespaces), options.top),
-        by_type: top_n(to_aggregates(types), options.top),
+        by_kind,
+        by_assembly,
+        by_namespace,
+        by_type,
         largest_strings: strings,
-        unowned: top_n(to_aggregates(unowned), options.top),
+        unowned,
         limit_status: limit_status(total, NATIVEAOT_METADATA_LIMIT),
         peak_tracked_bytes: 0,
+        concentration: coverage,
     }
 }
 

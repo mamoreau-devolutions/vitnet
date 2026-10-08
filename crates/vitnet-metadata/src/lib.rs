@@ -6,8 +6,8 @@ mod offset;
 mod ownership;
 
 pub use analysis::{
-    Aggregate, Analysis, AnalysisOptions, Comparison, ComparisonEntry, LimitStatus, MetadataRecord,
-    Preview, StreamingAnalyzer, StringEntry, analyze, analyze_stream,
+    Aggregate, Analysis, AnalysisOptions, Comparison, ComparisonEntry, Concentration, LimitStatus,
+    MetadataRecord, Preview, StreamingAnalyzer, StringEntry, analyze, analyze_stream,
     analyze_stream_with_aggregate_limit, compare, metadata_records_from_raw, preview_bytes, top_n,
 };
 pub use decoder::{

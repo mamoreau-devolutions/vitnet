@@ -423,6 +423,21 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d245f478577f809a851594d02313b640fb437e0bb33866753cff937863096954"
 
 [[package]]
+name = "vitnet-attribution"
+version = "0.1.0"
+dependencies = [
+ "blake3",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror",
+ "vitnet-core",
+ "vitnet-dgml",
+ "vitnet-metadata",
+ "vitnet-mstat",
+]
+
+[[package]]
 name = "vitnet-core"
 version = "0.1.0"
 dependencies = [
@@ -437,6 +452,7 @@ dependencies = [
  "blake3",
  "fs4",
  "fst",
+ "memchr",
  "quick-xml",
  "serde",
  "serde_json",
@@ -452,6 +468,8 @@ name = "vitnet-fuzz"
 version = "0.0.0"
 dependencies = [
  "libfuzzer-sys",
+ "serde_json",
+ "vitnet-attribution",
  "vitnet-dgml",
  "vitnet-metadata",
  "vitnet-mstat",
@@ -471,6 +489,7 @@ name = "vitnet-mstat"
 version = "0.1.0"
 dependencies = [
  "blake3",
+ "memchr",
  "mmap-guard",
  "serde",
  "thiserror",

@@ -8,15 +8,23 @@ use std::path::{Path, PathBuf};
 use vitnet_core::{ByteSize, Diagnostic, ExitCode, ResourceBudget};
 use vitnet_dgml::{
     DgmlCacheInfo, DgmlCachePruneReport, DgmlCacheVerification, DgmlError, DgmlIndexReport,
-    DgmlStats, IndexControl, IndexOptions, StatsOptions, analyze_stats, build_index, cache_info,
+    DgmlStats, GraphSession, IncomingOptions, IndexControl, IndexOptions, SearchMode,
+    SearchOptions, SearchRank, StatsOptions, WhyOptions, analyze_stats, build_index, cache_info,
     prune_cache, verify_cache,
 };
 use vitnet_metadata::{
     Aggregate, AnalysisOptions, MetadataError, StreamingDecoder,
     analyze_stream_with_aggregate_limit,
 };
-use vitnet_mstat::{MstatDiff, MstatError, MstatSummary, diff_paths, summarize_path};
+use vitnet_mstat::{MstatDiff, MstatError, MstatSummary, diff_paths, summarize_path, top_path};
 use vitnet_report::{InputDescriptor, MetadataComparisonEnvelope, MetadataEnvelope};
+
+mod attribution_cli;
+pub mod daemon;
+pub mod explorer;
+mod insights_cli;
+pub use attribution_cli::AttributionCommand;
+pub use insights_cli::{BloatArgs, InsightArgs};
 
 const DEFAULT_MEMORY_LIMIT: u64 = 2 * 1024 * 1024 * 1024;
 
@@ -65,18 +73,45 @@ pub struct Cli {
     pub verbose: bool,
     #[arg(long, global = true)]
     pub strict: bool,
+    /// Use an already-running local Windows named-pipe graph daemon.
+    #[arg(long, global = true)]
+    pub daemon: Option<String>,
     #[command(subcommand)]
     pub command: Command,
 }
 
 #[derive(Clone, Debug, Subcommand)]
 pub enum Command {
+    /// Prepare, export and browse bounded local evidence workspaces.
+    Explore(PlaceholderCommand<explorer::ExploreCommand>),
+    /// Import and query generic build, source, package and generator evidence.
+    Attribution(PlaceholderCommand<AttributionCommand>),
+    /// Reconcile metadata and MSTAT evidence without adding overlapping breakdowns.
+    Bloat(BloatArgs),
     Metadata(MetadataArgs),
     Mstat(PlaceholderCommand<MstatCommand>),
     /// `NativeAOT` dependency-graph analysis.
     Dgml(PlaceholderCommand<DgmlCommand>),
     /// Inspect and maintain immutable vitnet cache generations.
     Cache(PlaceholderCommand<CacheCommand>),
+    /// Manage a foreground Windows named-pipe query daemon.
+    Daemon(PlaceholderCommand<DaemonCommand>),
+}
+
+#[derive(Clone, Debug, Subcommand)]
+pub enum DaemonCommand {
+    Serve {
+        #[arg(long)]
+        pipe: String,
+    },
+    Status {
+        #[arg(long)]
+        pipe: String,
+    },
+    Stop {
+        #[arg(long)]
+        pipe: String,
+    },
 }
 
 #[derive(Clone, Debug, Args)]
@@ -87,6 +122,26 @@ pub struct PlaceholderCommand<T: Subcommand> {
 
 #[derive(Clone, Debug, Subcommand)]
 pub enum MstatCommand {
+    /// Rank method identities with separate body, GC and exception-info costs.
+    Methods(InsightArgs),
+    /// Reconcile resource groups by assembly, culture and resource name.
+    Resources(InsightArgs),
+    /// Apply explicit overlapping literal-symbol cohort rules.
+    Cohorts(InsightArgs),
+    /// Rank literal prefixes of generic-shaped producer names (heuristic).
+    Generics(InsightArgs),
+    /// Produce all four insight projections from the same input.
+    Insights(InsightArgs),
+    /// Rank the largest producer identities, preserving exact size accounting.
+    Top {
+        input: PathBuf,
+        #[arg(long, value_parser = parse_positive_usize, default_value_t = 50)]
+        top: usize,
+        #[arg(long)]
+        contains: Option<String>,
+        #[arg(long, value_parser = ["Methods", "Types", "Blobs", "RvaFields", "FrozenObjects", "ManifestResources", "DeduplicatedMethods"])]
+        stream: Option<String>,
+    },
     Summary {
         input: PathBuf,
     },
@@ -115,11 +170,135 @@ pub enum DgmlCommand {
     Search {
         input: PathBuf,
         query: String,
+        /// Count every match in the scanned range instead of stopping at the display limit.
+        #[arg(long)]
+        count_all: bool,
+        #[arg(long, value_enum, default_value_t = SearchRankArg::Id)]
+        rank: SearchRankArg,
+        #[arg(long, value_enum, default_value_t = SearchModeArg::Contains)]
+        mode: SearchModeArg,
+        #[arg(long)]
+        ignore_case: bool,
+        #[arg(long, value_parser = parse_positive_usize, default_value_t = 50)]
+        limit: usize,
+        #[arg(long)]
+        after_id: Option<u64>,
+        #[arg(long, default_value_t = 5_000_000)]
+        max_scanned: u64,
+        #[arg(long, default_value_t = 30_000)]
+        timeout_ms: u64,
+        #[arg(long, value_parser = parse_positive_usize, default_value_t = 256)]
+        preview_bytes: usize,
+        #[arg(long)]
+        generation: Option<String>,
+    },
+    /// Page the immediate incoming dependencies of one node.
+    Incoming {
+        input: PathBuf,
+        node_id: u64,
+        #[arg(long, value_parser = parse_positive_usize, default_value_t = 50)]
+        limit: usize,
+        #[arg(long)]
+        after_edge: Option<u64>,
+        #[arg(long, default_value_t = 5000)]
+        timeout_ms: u64,
+        #[arg(long, value_parser = parse_positive_usize, default_value_t = 256)]
+        preview_bytes: usize,
+        #[arg(long)]
+        generation: Option<String>,
+    },
+    /// Explain multiple IDs using one generation and a shared total traversal budget.
+    Batch {
+        input: PathBuf,
+        #[arg(long, value_delimiter = ',', required = true)]
+        ids: Vec<u64>,
+        #[command(flatten)]
+        options: BatchArgs,
     },
     Why {
         input: PathBuf,
         query: String,
+        #[arg(long, default_value_t = 16)]
+        max_depth: usize,
+        #[arg(long, default_value = "3")]
+        max_paths: NonZeroUsize,
+        #[arg(long, default_value = "10000")]
+        max_visited: NonZeroUsize,
+        #[arg(long, default_value_t = 100_000)]
+        max_edges: u64,
+        #[arg(long, default_value_t = 5000)]
+        timeout_ms: u64,
+        #[arg(long, default_value = "256")]
+        preview_bytes: NonZeroUsize,
+        #[arg(long)]
+        generation: Option<String>,
     },
+}
+
+#[derive(Clone, Debug, Args)]
+pub struct BatchArgs {
+    #[arg(long, default_value_t = 16)]
+    pub max_depth: usize,
+    #[arg(long, value_parser = parse_positive_usize, default_value_t = 3)]
+    pub max_paths: usize,
+    #[arg(long, value_parser = parse_positive_usize, default_value_t = 10_000)]
+    pub max_visited: usize,
+    #[arg(long, default_value_t = 100_000)]
+    pub max_edges: u64,
+    #[arg(long, default_value_t = 5000)]
+    pub timeout_ms: u64,
+    #[arg(long, value_parser = parse_positive_usize, default_value_t = 256)]
+    pub preview_bytes: usize,
+    #[arg(long)]
+    pub generation: Option<String>,
+}
+
+impl From<&BatchArgs> for WhyOptions {
+    fn from(value: &BatchArgs) -> Self {
+        Self {
+            max_depth: value.max_depth,
+            max_paths: value.max_paths,
+            max_visited: value.max_visited,
+            max_edges: value.max_edges,
+            timeout_ms: value.timeout_ms,
+            preview_bytes: value.preview_bytes,
+            generation: value.generation.clone(),
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]
+pub enum SearchRankArg {
+    Id,
+    Incoming,
+}
+
+impl From<SearchRankArg> for SearchRank {
+    fn from(value: SearchRankArg) -> Self {
+        match value {
+            SearchRankArg::Id => Self::Id,
+            SearchRankArg::Incoming => Self::Incoming,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]
+pub enum SearchModeArg {
+    Id,
+    Exact,
+    Prefix,
+    Contains,
+}
+
+impl From<SearchModeArg> for SearchMode {
+    fn from(value: SearchModeArg) -> Self {
+        match value {
+            SearchModeArg::Id => Self::Id,
+            SearchModeArg::Exact => Self::Exact,
+            SearchModeArg::Prefix => Self::Prefix,
+            SearchModeArg::Contains => Self::Contains,
+        }
+    }
 }
 
 #[derive(Clone, Debug, Subcommand)]
@@ -137,6 +316,15 @@ pub struct MetadataArgs {
     pub top: usize,
     #[arg(long)]
     pub assembly: Option<String>,
+    /// Exact owning type from the by-type report, including its assembly prefix.
+    #[arg(long = "type")]
+    pub type_name: Option<String>,
+    /// Literal case-sensitive substring of resolved assembly, namespace or type.
+    #[arg(long, value_parser = clap::builder::NonEmptyStringValueParser::new())]
+    pub contains: Option<String>,
+    /// Maximum UTF-8 bytes per string preview.
+    #[arg(long, value_parser = parse_positive_usize, default_value_t = 256)]
+    pub preview_bytes: usize,
     #[arg(long, value_enum, value_delimiter = ',', default_values_t = [GroupArg::Assembly, GroupArg::Namespace, GroupArg::Type, GroupArg::Kind])]
     pub group: Vec<GroupArg>,
     #[arg(long)]
@@ -282,17 +470,162 @@ pub fn execute(cli: &Cli) -> Result<String, AppError> {
 ///
 /// Returns the same typed diagnostics as [`execute`].
 pub fn execute_with_index_control(cli: &Cli, control: &IndexControl) -> Result<String, AppError> {
+    if cli.daemon.is_some()
+        && !matches!(&cli.command,
+        Command::Dgml(arguments) if matches!(arguments.command, DgmlCommand::Search { .. } | DgmlCommand::Why { .. } | DgmlCommand::Incoming { .. } | DgmlCommand::Batch { .. }))
+    {
+        return Err(AppError::Unsupported(Box::new(Diagnostic::malformed(
+            "daemon.command",
+            "--daemon supports only dgml search, why, incoming and batch",
+        ))));
+    }
     match &cli.command {
+        Command::Explore(arguments) => {
+            validate_resources(cli)?;
+            explorer::execute(cli, &arguments.command, control)
+        }
+        Command::Attribution(arguments) => {
+            validate_resources(cli)?;
+            attribution_cli::execute(cli, &arguments.command)
+        }
+        Command::Bloat(arguments) => {
+            validate_resources(cli)?;
+            insights_cli::execute_bloat(cli, arguments)
+        }
         Command::Metadata(arguments) => execute_metadata(cli, arguments),
         Command::Mstat(arguments) => execute_mstat(cli, &arguments.command),
         Command::Dgml(arguments) => execute_dgml(cli, &arguments.command, control),
         Command::Cache(arguments) => execute_cache(cli, &arguments.command),
+        Command::Daemon(arguments) => execute_daemon(cli, &arguments.command),
+    }
+}
+
+fn daemon_diagnostic(diagnostic: Box<Diagnostic>) -> AppError {
+    if diagnostic.code.starts_with("resource.") {
+        AppError::Resource(diagnostic)
+    } else if diagnostic.code.starts_with("io.") {
+        AppError::IoDiagnostic(diagnostic)
+    } else {
+        AppError::Unsupported(diagnostic)
+    }
+}
+
+fn daemon_query<T: serde::de::DeserializeOwned>(
+    cli: &Cli,
+    pipe: &str,
+    request: &daemon::Request,
+) -> Result<T, AppError> {
+    let response =
+        daemon::call(pipe, request).map_err(|error| daemon_diagnostic(error.diagnostic))?;
+    if !response.ok {
+        return Err(daemon_diagnostic(Box::new(response.error.ok_or_else(
+            || {
+                AppError::IoDiagnostic(Box::new(Diagnostic::malformed(
+                    "io.daemon.protocol",
+                    "failed response lacks a diagnostic",
+                )))
+            },
+        )?)));
+    }
+    if response.error.is_some() {
+        return Err(AppError::IoDiagnostic(Box::new(Diagnostic::malformed(
+            "io.daemon.protocol",
+            "successful response contains a failure diagnostic",
+        ))));
+    }
+    if cli.verbose {
+        eprintln!("daemon session reused: {}", response.session_reused);
+    }
+    serde_json::from_value(response.data.ok_or_else(|| {
+        AppError::IoDiagnostic(Box::new(Diagnostic::malformed(
+            "io.daemon.protocol",
+            "successful response lacks data",
+        )))
+    })?)
+    .map_err(|error| {
+        AppError::IoDiagnostic(Box::new(Diagnostic::malformed(
+            "io.daemon.protocol",
+            format!("invalid query response: {error}"),
+        )))
+    })
+}
+
+fn execute_daemon(cli: &Cli, command: &DaemonCommand) -> Result<String, AppError> {
+    validate_resources(cli)?;
+    if let DaemonCommand::Serve { pipe } = command {
+        daemon::serve(pipe, cli.memory_limit.0)
+            .map_err(|error| daemon_diagnostic(error.diagnostic))?;
+        return Ok("Daemon stopped; graph sessions released.".into());
+    }
+    let (pipe, request) = match command {
+        DaemonCommand::Status { pipe } => (pipe, daemon::Request::Health),
+        DaemonCommand::Stop { pipe } => (pipe, daemon::Request::Shutdown),
+        DaemonCommand::Serve { .. } => unreachable!(),
+    };
+    let response: serde_json::Value = daemon_query(cli, pipe, &request)?;
+    match cli.format {
+        FormatArg::Ndjson => serde_json::to_string(&response).map_err(AppError::Json),
+        FormatArg::Json | FormatArg::Table => {
+            serde_json::to_string_pretty(&response).map_err(AppError::Json)
+        }
     }
 }
 
 fn execute_mstat(cli: &Cli, command: &MstatCommand) -> Result<String, AppError> {
     validate_resources(cli)?;
     match command {
+        MstatCommand::Top {
+            input,
+            top,
+            contains,
+            stream,
+        } => {
+            let report = top_path(
+                input,
+                cli.memory_limit.0,
+                *top,
+                contains.as_deref(),
+                stream.as_deref(),
+            )
+            .map_err(|error| {
+                if error.diagnostic.code == "mstat.io" {
+                    AppError::IoDiagnostic(error.diagnostic)
+                } else if error.diagnostic.code.starts_with("resource.") {
+                    AppError::Resource(error.diagnostic)
+                } else {
+                    AppError::Mstat(error)
+                }
+            })?;
+            match cli.format {
+                FormatArg::Json => serde_json::to_string_pretty(&report).map_err(AppError::Json),
+                FormatArg::Ndjson => report
+                    .sections
+                    .iter()
+                    .map(|section| ndjson_line(&report.schema, "sections", section))
+                    .collect::<Result<Vec<_>, _>>()
+                    .map(|lines| lines.join("\n")),
+                FormatArg::Table => {
+                    let mut output = format!(
+                        "MSTAT accounted size: {} B\nIdentities are opaque producer symbols, not DGML IDs. Breakdowns overlap accounted streams.\n",
+                        report.accounted_size_bytes
+                    );
+                    for section in &report.sections {
+                        writeln!(&mut output, "\n{}{}: matched {} / {} B across {} identities\nBytes        Records  Identity",
+                            section.name, if section.accounted { "" } else { " [overlapping breakdown]" },
+                            section.matched_bytes, section.total_bytes, section.matched_identities).unwrap();
+                        for entry in &section.entries {
+                            writeln!(
+                                &mut output,
+                                "{:<12} {:<8} {}",
+                                entry.bytes, entry.records, entry.identity
+                            )
+                            .unwrap();
+                        }
+                    }
+                    Ok(output)
+                }
+            }
+        }
         MstatCommand::Summary { input } => {
             let summary = summarize_path(input, cli.memory_limit.0).map_err(|error| {
                 if error.diagnostic.code == "mstat.io" {
@@ -317,6 +650,7 @@ fn execute_mstat(cli: &Cli, command: &MstatCommand) -> Result<String, AppError> 
             })?;
             render_mstat_diff(cli.format, &report)
         }
+        _ => insights_cli::execute_mstat(cli, command),
     }
 }
 
@@ -477,6 +811,7 @@ fn render_mstat_diff(format: FormatArg, report: &MstatDiff) -> Result<String, Ap
     }
 }
 
+#[allow(clippy::too_many_lines)]
 fn execute_dgml(
     cli: &Cli,
     command: &DgmlCommand,
@@ -551,10 +886,332 @@ fn execute_dgml(
             })?;
             render_dgml_stats(cli.format, &stats)
         }
-        DgmlCommand::Search { .. } | DgmlCommand::Why { .. } => Err(unsupported(
-            "dgml",
-            "the remaining Phase 5 index/query work",
-        )),
+        DgmlCommand::Search {
+            input,
+            query,
+            count_all,
+            rank,
+            mode,
+            ignore_case,
+            limit,
+            after_id,
+            max_scanned,
+            timeout_ms,
+            preview_bytes,
+            generation,
+        } => {
+            validate_resources(cli)?;
+            let options = SearchOptions {
+                count_all: *count_all,
+                rank: (*rank).into(),
+                mode: (*mode).into(),
+                ignore_case: *ignore_case,
+                limit: *limit,
+                after_id: *after_id,
+                max_scanned: *max_scanned,
+                timeout_ms: *timeout_ms,
+                preview_bytes: *preview_bytes,
+                generation: generation.clone(),
+            };
+            let report: vitnet_dgml::SearchReport = if let Some(pipe) = &cli.daemon {
+                daemon_query(
+                    cli,
+                    pipe,
+                    &daemon::Request::Search {
+                        index: std::fs::canonicalize(input).map_err(|source| AppError::Io {
+                            path: input.clone(),
+                            source,
+                        })?,
+                        query: query.clone(),
+                        options,
+                    },
+                )?
+            } else {
+                GraphSession::open(input, cli.memory_limit.0)
+                    .map_err(cache_error)?
+                    .search(query, &options)
+                    .map_err(cache_error)?
+            };
+            match cli.format {
+                FormatArg::Json => serde_json::to_string_pretty(&report).map_err(AppError::Json),
+                FormatArg::Ndjson => serde_json::to_string(&report).map_err(AppError::Json),
+                FormatArg::Table => {
+                    let mut output = format!(
+                        "DGML search: {} matches ({} shown, {} omitted); scanned {} slots in {} ms\nGeneration: {}\nStatus: {} (counts/ranks cover this scanned range only; not byte sizes)\nNode ID      Incoming     Label\n",
+                        report.matched_nodes,
+                        report.entries.len(),
+                        report.omitted_matches,
+                        report.scanned_nodes,
+                        report.elapsed_ms,
+                        report.generation,
+                        report.stop_reason
+                    );
+                    for entry in report.entries {
+                        writeln!(
+                            &mut output,
+                            "{:<12} {:<12} {}{}",
+                            entry.node_id,
+                            entry.incoming_edges,
+                            entry.label,
+                            if entry.truncated { "..." } else { "" }
+                        )
+                        .unwrap();
+                    }
+                    if let Some(after) = report.next_after_id {
+                        writeln!(
+                            &mut output,
+                            "Continue: --after-id {after} --generation {}",
+                            report.generation
+                        )
+                        .unwrap();
+                    }
+                    Ok(output)
+                }
+            }
+        }
+        DgmlCommand::Incoming {
+            input,
+            node_id,
+            limit,
+            after_edge,
+            timeout_ms,
+            preview_bytes,
+            generation,
+        } => {
+            validate_resources(cli)?;
+            let options = IncomingOptions {
+                limit: *limit,
+                after_edge: *after_edge,
+                timeout_ms: *timeout_ms,
+                preview_bytes: *preview_bytes,
+                generation: generation.clone(),
+            };
+            let report: vitnet_dgml::IncomingReport = if let Some(pipe) = &cli.daemon {
+                daemon_query(
+                    cli,
+                    pipe,
+                    &daemon::Request::Incoming {
+                        index: canonical_index(input)?,
+                        node_id: *node_id,
+                        options,
+                    },
+                )?
+            } else {
+                GraphSession::open(input, cli.memory_limit.0)
+                    .map_err(cache_error)?
+                    .incoming(*node_id, &options)
+                    .map_err(cache_error)?
+            };
+            render_query(cli.format, &report, || {
+                let mut output = format!(
+                    "Incoming {}: {}\nGeneration: {}\n{} / {} edges; stop: {}\n",
+                    node_id,
+                    report.node.label,
+                    report.generation,
+                    report.edges.len(),
+                    report.total_edges,
+                    report.stop_reason
+                );
+                for edge in &report.edges {
+                    writeln!(
+                        &mut output,
+                        "{}: {} -> {} [{}{}] {}",
+                        edge.ordinal,
+                        edge.source_id,
+                        edge.target_id,
+                        edge.reason,
+                        if edge.reason_truncated { "..." } else { "" },
+                        edge.source
+                            .as_ref()
+                            .map_or("[missing source]", |node| node.label.as_str())
+                    )
+                    .unwrap();
+                }
+                if let Some(after) = report.next_after_edge {
+                    writeln!(
+                        &mut output,
+                        "Continue: --after-edge {after} --generation {}",
+                        report.generation
+                    )
+                    .unwrap();
+                }
+                writeln!(&mut output, "{}", report.caveat).unwrap();
+                output
+            })
+        }
+        DgmlCommand::Batch {
+            input,
+            ids,
+            options,
+        } => {
+            validate_resources(cli)?;
+            let options = WhyOptions::from(options);
+            let report: vitnet_dgml::BatchReport = if let Some(pipe) = &cli.daemon {
+                daemon_query(
+                    cli,
+                    pipe,
+                    &daemon::Request::Batch {
+                        index: canonical_index(input)?,
+                        ids: ids.clone(),
+                        options,
+                    },
+                )?
+            } else {
+                GraphSession::open(input, cli.memory_limit.0)
+                    .map_err(cache_error)?
+                    .batch(ids, &options)
+                    .map_err(cache_error)?
+            };
+            render_query(cli.format, &report, || {
+                let mut output = format!(
+                    "Batch: {} / {} IDs; stop: {}\nGeneration: {}\nTotal work: {} edges / {} visits\n",
+                    report.reports.len(),
+                    report.requested_nodes,
+                    report.stop_reason,
+                    report.generation,
+                    report.examined_edges,
+                    report.visited_nodes
+                );
+                for item in &report.reports {
+                    writeln!(
+                        &mut output,
+                        "\n{}: {} (stop: {})",
+                        item.node.node_id, item.node.label, item.stop_reason
+                    )
+                    .unwrap();
+                    for path in &item.paths {
+                        writeln!(&mut output, "Witness: {}", path.root_kind).unwrap();
+                        for (position, node) in path.nodes.iter().enumerate() {
+                            writeln!(&mut output, "  {}: {}", node.node_id, node.label).unwrap();
+                            if let Some(reason) = path.reasons.get(position) {
+                                writeln!(
+                                    &mut output,
+                                    "    --[{}{}]-->",
+                                    reason,
+                                    if path.reasons_truncated[position] {
+                                        "..."
+                                    } else {
+                                        ""
+                                    }
+                                )
+                                .unwrap();
+                            }
+                        }
+                    }
+                }
+                output.push_str("\nCompletion means all requested IDs were processed; each witness retains its own stop/caveat. Fan-in is not byte size.\n");
+                output
+            })
+        }
+        DgmlCommand::Why {
+            input,
+            query,
+            max_depth,
+            max_paths,
+            max_visited,
+            max_edges,
+            timeout_ms,
+            preview_bytes,
+            generation,
+        } => {
+            validate_resources(cli)?;
+            let id = query.parse::<u64>().map_err(|_| {
+                AppError::Dgml(DgmlError {
+                    diagnostic: Box::new(Diagnostic::malformed(
+                        "dgml.query.id",
+                        "why requires a numeric node ID from dgml search",
+                    )),
+                })
+            })?;
+            let options = WhyOptions {
+                max_depth: *max_depth,
+                max_paths: max_paths.get(),
+                max_visited: max_visited.get(),
+                max_edges: *max_edges,
+                timeout_ms: *timeout_ms,
+                preview_bytes: preview_bytes.get(),
+                generation: generation.clone(),
+            };
+            let report: vitnet_dgml::WhyReport = if let Some(pipe) = &cli.daemon {
+                daemon_query(
+                    cli,
+                    pipe,
+                    &daemon::Request::Why {
+                        index: std::fs::canonicalize(input).map_err(|source| AppError::Io {
+                            path: input.clone(),
+                            source,
+                        })?,
+                        node_id: id,
+                        options,
+                    },
+                )?
+            } else {
+                GraphSession::open(input, cli.memory_limit.0)
+                    .map_err(cache_error)?
+                    .why(id, &options)
+                    .map_err(cache_error)?
+            };
+            match cli.format {
+                FormatArg::Json => serde_json::to_string_pretty(&report).map_err(AppError::Json),
+                FormatArg::Ndjson => serde_json::to_string(&report).map_err(AppError::Json),
+                FormatArg::Table => {
+                    let mut output = format!(
+                        "Why {}: {}\nVisited: {} nodes, {} edges; stop: {}\n",
+                        id,
+                        report.node.label,
+                        report.visited_nodes,
+                        report.examined_edges,
+                        report.stop_reason
+                    );
+                    for path in &report.paths {
+                        writeln!(&mut output, "\nWitness ({})", path.root_kind).unwrap();
+                        for (index, node) in path.nodes.iter().enumerate() {
+                            writeln!(
+                                &mut output,
+                                "{}: {}{}",
+                                node.node_id,
+                                node.label,
+                                if node.truncated { "..." } else { "" }
+                            )
+                            .unwrap();
+                            if let Some(reason) = path.reasons.get(index) {
+                                writeln!(
+                                    &mut output,
+                                    "  --[{reason}{}]-->",
+                                    if path.reasons_truncated[index] {
+                                        "..."
+                                    } else {
+                                        ""
+                                    }
+                                )
+                                .unwrap();
+                            }
+                        }
+                    }
+                    writeln!(&mut output, "\n{}", report.caveat).unwrap();
+                    Ok(output)
+                }
+            }
+        }
+    }
+}
+
+fn canonical_index(input: &Path) -> Result<PathBuf, AppError> {
+    std::fs::canonicalize(input).map_err(|source| AppError::Io {
+        path: input.into(),
+        source,
+    })
+}
+
+fn render_query<T: Serialize>(
+    format: FormatArg,
+    report: &T,
+    table: impl FnOnce() -> String,
+) -> Result<String, AppError> {
+    match format {
+        FormatArg::Json => serde_json::to_string_pretty(report).map_err(AppError::Json),
+        FormatArg::Ndjson => serde_json::to_string(report).map_err(AppError::Json),
+        FormatArg::Table => Ok(table()),
     }
 }
 
@@ -725,15 +1382,6 @@ fn render_dgml_stats(format: FormatArg, stats: &DgmlStats) -> Result<String, App
     }
 }
 
-fn unsupported(command: &str, phase: &str) -> AppError {
-    let mut diagnostic = Diagnostic::malformed(
-        format!("{command}.not_implemented"),
-        format!("`vitnet {command}` is a stable placeholder and is not implemented in Phase 1"),
-    );
-    diagnostic.guidance = Some(format!("implement this command during {phase}"));
-    AppError::Unsupported(Box::new(diagnostic))
-}
-
 fn execute_metadata(cli: &Cli, arguments: &MetadataArgs) -> Result<String, AppError> {
     validate_resources(cli)?;
     let mut before = analyze_path(
@@ -839,8 +1487,16 @@ fn analyze_path(
             .assembly
             .as_ref()
             .map(|assembly| assembly.as_bytes().to_vec()),
+        type_filter: arguments
+            .type_name
+            .as_ref()
+            .map(|name| name.as_bytes().to_vec()),
+        contains_filter: arguments
+            .contains
+            .as_ref()
+            .map(|name| name.as_bytes().to_vec()),
         top: arguments.top,
-        preview_bytes: 256,
+        preview_bytes: arguments.preview_bytes,
     };
     if path == Path::new("-") {
         return analyze_reader_with_limits(
@@ -959,6 +1615,13 @@ fn render_ndjson(report: &MetadataEnvelope, arguments: &MetadataArgs) -> Result<
         }))
         .map_err(AppError::Json)?,
     ];
+    for (section, coverage) in &report.sections.concentration {
+        lines.push(ndjson_line(
+            &report.schema,
+            &format!("{section}_concentration"),
+            coverage,
+        )?);
+    }
     for (section, entries) in analysis_sections(report, arguments) {
         for entry in entries {
             lines.push(ndjson_line(&report.schema, section, entry)?);
@@ -1013,6 +1676,18 @@ fn render_table(report: &MetadataEnvelope, arguments: &MetadataArgs) -> String {
     }
     for (section, entries) in analysis_sections(report, arguments) {
         render_aggregate_section(&mut output, heading(section), entries, report);
+        if let Some(coverage) = report.sections.concentration.get(section) {
+            writeln!(
+                &mut output,
+                "Top coverage: {} / {} B across {} / {} groups; omitted {} B",
+                coverage.reported_bytes,
+                coverage.total_bytes,
+                coverage.reported_groups,
+                coverage.total_groups,
+                coverage.omitted_bytes
+            )
+            .unwrap();
+        }
     }
     if arguments.strings {
         output.push_str("\nLargest strings\nBytes        Offset       Value\n");

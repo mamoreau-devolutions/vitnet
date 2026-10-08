@@ -27,6 +27,8 @@ pub struct Summary {
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct Sections {
+    #[serde(default)]
+    pub concentration: std::collections::BTreeMap<String, vitnet_metadata::Concentration>,
     pub by_kind: Vec<vitnet_metadata::Aggregate>,
     pub by_assembly: Vec<vitnet_metadata::Aggregate>,
     pub by_namespace: Vec<vitnet_metadata::Aggregate>,
@@ -69,6 +71,7 @@ impl MetadataEnvelope {
                 peak_tracked_memory_bytes: analysis.peak_tracked_bytes,
             },
             sections: Sections {
+                concentration: analysis.concentration,
                 by_kind: analysis.by_kind,
                 by_assembly: analysis.by_assembly,
                 by_namespace: analysis.by_namespace,

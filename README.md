@@ -1,5 +1,22 @@
 # vitnet
 
+For component attribution, concentration, method/resource breakdowns and
+batched retention evidence, see the [bloat-analysis workflow](docs/bloat-analysis.md).
+To connect those bytes to dependency routes, source/generator declarations,
+embedded assets and controlled native-build changes, see the
+[build and source attribution workflow](docs/attribution.md).
+For navigable budget diagrams, contributor/source inspection and bounded
+retention graphs, use the [visual explorer](docs/explorer.md):
+
+```powershell
+vitnet --memory-limit 2GiB explore prepare .\build-index --bundle .\explorer-bundle
+vitnet --memory-limit 2GiB explore browse .\explorer-bundle --open
+vitnet explore export .\explorer-bundle --html .\size-report.html
+```
+
+The portable report works offline. Live browsing queries small indexed slices;
+neither mode loads the whole dependency graph into the browser.
+
 `vitnet` is a clean-room, MIT-licensed Rust command-line tool for explaining
 size bloat in NativeAOT artifacts. It provides bounded-memory analyzers for
 NativeAOT metadata logs, MSTAT files, and very large dependency graphs.
@@ -40,6 +57,16 @@ Restrict attribution to one owning assembly:
 ```console
 vitnet metadata app.metadata.csv --assembly Product.Core --top 50
 ```
+
+Drill into one exact `by_type` key and its owned strings:
+
+```console
+vitnet metadata app.metadata.csv --type "Product.Core!Product.JsonContext+<>c" --strings --preview-bytes 120
+```
+
+Type and assembly filters intersect. Filtering attribution does not alter
+consecutive-record sizes or the whole-input lower bound. Namespace/type names
+are already qualified by the producer, not reconstructed from repeated prefixes.
 
 Write stable, versioned JSON:
 
@@ -85,6 +112,20 @@ The `vitnet.mstat-diff.v1` report lists additions, removals, and retained
 identity size changes for every accounted stream and specialized breakdown.
 Its reconciliation object makes the signed accounted delta independently
 checkable. Only bounded top changes are converted to display strings.
+
+Rank contributors before choosing what to investigate:
+
+```console
+vitnet mstat top app.mstat --top 20
+vitnet mstat top app.mstat --stream Methods --contains JsonContext --top 20
+vitnet mstat top app.mstat --stream ManifestResources --contains Resources
+```
+
+Top mode coalesces complete producer identities, matches case-sensitive
+substrings, and reports both total and matched bytes for each stream. Specialized
+breakdowns overlap `Blobs`; do not add them to accounted totals. Resource names
+are decoded from UTF-16 and displayed as `assembly!resource`; names/symbols
+remain opaque, not speculative managed-method reconstructions.
 
 ## DGML statistics
 
@@ -143,6 +184,101 @@ other platforms retain their system allocator. Index formats are unchanged.
 See [`docs/performance-budget.md`](docs/performance-budget.md) for measured
 strategy comparisons and their limitations.
 
+## Bounded graph investigation
+
+Use the existing input-specific index directory, not XML or the cache root:
+
+```console
+vitnet dgml search <index-directory> JsonContext --limit 10
+vitnet dgml search <index-directory> JsonContext --mode prefix --ignore-case
+vitnet dgml search <index-directory> 12345 --mode id
+vitnet dgml why <index-directory> 12345 --max-depth 32 --max-visited 50000
+```
+
+Search matches complete labels and truncates only previews. Results are ordered
+by numeric ID. `limit`, `max_scanned`, or `timeout` results include a resumable
+`--after-id` cursor and `--generation` token; `complete` means the search reached
+the end. Defaults inspect at most five million slots in 30 seconds; raise
+`--max-scanned` explicitly for a whole-index search. Labels are scanned through
+bounded buffers, never loaded into an in-memory FST or graph.
+
+Why returns shortest incoming BFS witnesses with the original edge reasons.
+Depth, visited-node, examined-edge, path, and timeout caps are explicit; partial
+results name their stopping condition. Root names are arbitrary producer labels.
+An empty-reason edge follows NativeAOT's root convention; a zero-in-degree node
+alone is only a candidate. Conditional `Primary`/`Secondary` links encode
+conjunctions, so a single path does not prove one condition sufficient. Fan-in
+and reachability are evidence, not byte-savings estimates.
+
+An optional Windows foreground daemon retains up to two bounded graph sessions:
+
+```console
+vitnet --memory-limit 256MiB daemon serve --pipe vitnet-local
+vitnet daemon status --pipe vitnet-local
+vitnet --daemon vitnet-local dgml search <index-directory> JsonContext --limit 10
+vitnet --daemon vitnet-local dgml why <index-directory> 12345
+vitnet daemon stop --pipe vitnet-local
+```
+
+Run `serve` in a separate terminal; the CLI never silently starts a service.
+HTTP travels only over a local Windows named pipe, not a TCP listener. Queries
+remain bounded; the daemon retains file readers and generation locks, not
+multi-gigabyte graph data. Requests are capped at 1 MiB and responses at 16 MiB;
+connect/read/request deadlines and a bounded serialized worker prevent
+unbounded client/job queues. Stop it before rebuilding or pruning an index it
+holds. Query memory limits come from `daemon serve`; a client's global memory
+option does not resize the running server. Index paths are resolved on the
+client so the daemon may run from a different directory.
+Standalone commands remain available on other platforms. See
+[`docs/dogfooding.md`](docs/dogfooding.md) for the five-step analysis workflow.
+
+For a compact interpreted cross-input report:
+
+```console
+vitnet bloat --metadata <metadata.csv> --mstat <image.mstat> --brief
+vitnet --format json bloat --metadata <metadata.csv> --mstat <image.mstat> --brief --rules <rules.json>
+```
+
+The brief separates additive streams from overlapping evidence, quantifies
+method auxiliary costs, top-list coverage, resource cultures, cohort overlaps
+and predicate gaps, and supplies bounded contributor follow-up argument arrays.
+Density/auxiliary rerankings apply only to displayed source candidates, not
+global rankings or proven removable bytes. It uses the independent
+`vitnet.bloat-brief.v1` schema. Its additive `investigation` section
+(`vitnet.bloat-investigation.v1`) also shows exact blob buckets, dehydration
+accounting limits, diagnostic artifact bytes, full method-size bands, visible
+assembly/culture consolidation, repeated resource-name clues, directional
+cohort overlap, per-stream unmatched bytes, optional literal spelling hints,
+and proven 80/90/95% coverage prefixes.
+
+Existing report fields retain their meaning; MSTAT insights add blob detail,
+Methods add full-population bands, and Cohorts add once-counted stream unions.
+All CLI selectors and starter rules remain generic.
+
+To correlate accounting with build, dependency, source, generator, resource,
+native-image, and immutable graph evidence, first collect a versioned local
+bundle and import it into an immutable attribution index:
+
+```console
+dotnet tools\vitnet-evidence\bin\Debug\net10.0\vitnet-evidence.dll --output evidence.json --source-root D:\work\sample --binlog D:\work\sample\build.binlog --assets D:\work\sample\obj\project.assets.json --assembly D:\work\sample\bin\Release\net10.0\Sample.dll --mstat D:\work\sample\Sample.mstat
+vitnet attribution import evidence.json --index sample.attribution
+vitnet attribution report sample.attribution --top 30
+vitnet attribution source sample.attribution Sample_Project_Widget__Run
+vitnet attribution explain sample.attribution 12345 --graph scan_index
+vitnet attribution compare before.attribution after.attribution --top 30
+vitnet attribution verify sample.attribution
+```
+
+The optional .NET collector only reads existing local artifacts; it does not
+build the analyzed project, execute generators, load application assemblies, or
+run the application. The Rust CLI does not require .NET once evidence has been
+collected. Name-derived ownership remains a candidate, explicit mappings retain
+their evidence basis, generator output bytes are not generator DLL size,
+resource inventories overlap containers, and graph reachability is not runtime
+execution or a savings estimate. See
+[`docs/evidence-collector.md`](docs/evidence-collector.md) and
+[`docs/attribution-plan.md`](docs/attribution-plan.md).
+
 Useful global controls include:
 
 - `--memory-limit 256MiB` bounds retained analysis state and the largest
@@ -166,8 +302,8 @@ with 5, and internal invariants with 6. Invalid CLI options use code 2.
 - `metadata_lower_bound_bytes` is the observed whole-input lower bound.
 - `producer_offset_bits` records whether the log used the legacy 24-bit or
   current 25-bit packed-handle layout.
-- `selected_lower_bound_bytes` is the attributed lower bound after an assembly
-  filter.
+- `selected_lower_bound_bytes` is the attributed lower bound after assembly/type
+  filters.
 - `record_count` is the selected record count;
   `observed_record_count` is the whole-input count.
 - The prefix before the first record start is reported as unowned
@@ -203,8 +339,8 @@ CI compiles these boundaries and enforces dependency policy for both the
 workspace and the separate fuzz package, including libFuzzer's permissive
 NCSA license.
 
-DGML search/why remain stable placeholders for Phase 5. Index building,
-statistics, and cache maintenance are implemented.
+Bounded numeric-ID/label search and root witnesses are implemented. Regex/glob
+search, outgoing adjacency, and whole-graph size/savings attribution are not.
 
 The opt-in 101 GiB logical-graph benchmark generates its input in memory a
 record at a time; no 101 GiB fixture is stored:

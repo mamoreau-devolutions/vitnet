@@ -1,5 +1,90 @@
 # Performance budget
 
+The subsequent [ten-wave measurement ledger](performance-waves.md) records
+candidate decisions and semantic equality after the
+[ten bloat-analysis improvements](bloat-analysis.md).
+
+## Visual explorer
+
+The [explorer](explorer.md) was exercised against the unchanged full local
+attribution cache (3,705,889 identities) and both immutable graph generations:
+62,163,504 / 52,181,085 nodes and 82,043,250 / 67,938,326 edges. No graph
+was rebuilt, copied into an export or loaded into browser memory.
+
+Release measurements on the same Windows reference machine:
+
+| Operation / artifact | Result |
+| --- | ---: |
+| Complete bundle preparation, three supplemental inventories, two witnesses | 20.202 s |
+| Preparation peak sampled working set | 632,426,496 B (603.1 MiB) |
+| Offset sidecar | 29,647,120 B |
+| Snapshot JSON | 787,208 B (0.75 MiB) |
+| Self-contained HTML | 893,943 B (0.85 MiB) |
+| Local server readiness, including imported evidence | 1.536 s |
+| Server peak / post-navigation working set | 615.5 / 258.4 MiB |
+| Offline / authenticated live initial browser load | 184 / 205 ms |
+| Browser JavaScript heap at end of navigation | 5,785,456 B |
+| Maximum connected document elements in sampled views | 1,208 |
+| Worker stress: 1,000 nodes / 5,000 cyclic edges submitted, capped to 200 / 500 | 8.8 ms |
+| Main-thread interval delay during twelve expand/reset/reselect cycles, p95 / max | 10.7 / 11.0 ms |
+
+Headless installed Edge was used at 1440x1000 and 390x844. Checks covered all
+eight views, keyboard icicle zoom, offline generation-bound root paths,
+authenticated bootstrap, row/source queries, exact graph ID search, incoming
+and why queries, empty partial-page continuation, cancellation and stale-result
+isolation. Every sampled table stayed at or below 100 rows and each graph sheet
+within 200 nodes / 500 edges. The portable root-path example rendered twelve
+nodes and eleven edges; a deeper selected target retained its honest
+`max_depth` stop instead of fabricating a root.
+
+Preparation was sampled at 100 ms intervals. Browser load and interval-delay
+values are diagnostic warm-local samples, not cold-cache, cross-browser,
+worst-case or frame-rate guarantees. The worker stress tests bounded layout,
+not the paint cost of every possible 200-node sheet. Connected DOM counts
+exclude detached nodes awaiting garbage collection; the reported heap is an
+end-of-run value, not a browser-process peak.
+
+Source evidence, not graph size, dominates explorer server startup memory.
+Preparation reserves a bounded share for aggregate keys and fails explicitly
+on excess cardinality. Live text search is limited to 100,000 records/slots
+or cooperative 1.5-second checkpoints per batch; completing the whole graph
+can require many continuation pages. The memory option is not an RSS cap.
+Full checksum verification remains an explicit `explore verify` operation.
+
+The final release replay passed 38 browser cases with no page/console errors.
+Its refreshed HTML was 894,309 B; offline/live loads were 147/379 ms and the
+twelve interaction cycles had 12.4/12.8 ms p95/maximum interval delay. Two
+no-match graph pages each stopped at exactly 100,000 indexed slots, retaining
+string cursors `99999` and `199999` for continuation (6/5 ms). Slots include
+holes: these timings do not predict dense label-search cost. The replay also
+confirmed the 1,208 connected-element bound and shut down only its own explorer.
+The same warm-local and non-worst-case limitations apply to this replay.
+
+## Bounded analysis dogfooding
+
+Five try/improve/retry iterations are recorded in [`dogfooding.md`](dogfooding.md).
+Release query measurements used the already verified full RDM index generations;
+there was no XML reparse/reindex or whole-graph memory map:
+
+| Operation | Verified scope | Wall time | Peak working set |
+| --- | --- | ---: | ---: |
+| Exact no-match codegen label scan | 52,181,085 slots, complete | 7.190 s | 10.73 MiB |
+| Exact no-match scan label scan | 62,163,504 slots, complete | 8.571 s | 10.74 MiB |
+| Metadata exact type drilldown | 1,440,352 input records | 1.438 s | 182.67 MiB |
+| MSTAT top, all streams | complete compact inventory | 2.062 s | 1,003 MiB |
+| Daemon after both graph sessions used | two generations retained, no graph rows | batch completed | 12.17 MiB |
+
+Label scans used a 32 MiB budget. MSTAT top private memory was about 234 MiB;
+working set includes read-only mapped corpus pages, unlike tracked heap state.
+Server current private bytes after the batch were 12.84 MiB. Separate tiny-query
+CLI process launches took 40-90 ms both directly and through the daemon; this
+small uncontrolled warm-cache sample does not establish a CLI speedup. The
+benefit demonstrated is bounded session reuse and identical query results, not
+faster input indexing or bulk scans. Sampling used 10 ms intervals on the same
+Windows reference machine; cache state and concurrent load were not controlled.
+
+## Metadata foundation
+
 Phase 1 acceptance for the private/local 171 MB metadata CSV is at most 256 MiB
 peak RSS/private working set and at most 10 seconds in a release build.
 

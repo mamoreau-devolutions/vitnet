@@ -1,9 +1,13 @@
 //! Checked, zero-copy summaries for `NativeAOT` MSTAT v2 files.
 
+use memchr::memmem::Finder;
 use serde::{Deserialize, Serialize};
 use std::path::Path;
 use thiserror::Error;
 use vitnet_core::{Diagnostic, ResourceBudget};
+
+mod insights;
+pub use insights::*;
 
 const MIN_TRACKED_MEMORY: u64 = 64 * 1024;
 const PE_SIGNATURE: &[u8; 4] = b"PE\0\0";
@@ -120,6 +124,297 @@ pub struct MstatDiff {
     pub after_deduplicated_methods: DeduplicationSummary,
     pub reconciliation: MstatReconciliation,
     pub peak_tracked_memory_bytes: u64,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct MstatTopEntry {
+    pub identity: String,
+    pub identity_bytes: u64,
+    pub truncated: bool,
+    pub bytes: u64,
+    pub records: u64,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct MstatTopSection {
+    pub name: String,
+    pub accounted: bool,
+    pub total_bytes: u64,
+    pub matched_bytes: u64,
+    pub matched_identities: u64,
+    pub entries: Vec<MstatTopEntry>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct MstatTop {
+    pub schema: String,
+    pub accounted_size_bytes: u64,
+    pub sections: Vec<MstatTopSection>,
+    pub peak_tracked_memory_bytes: u64,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct CoalescedIdentity {
+    pub stream: String,
+    pub accounted: bool,
+    pub identity: String,
+    #[serde(default)]
+    pub raw_identity_blake3: String,
+    #[serde(default)]
+    pub identity_lossy: bool,
+    pub bytes: u64,
+    pub records: u64,
+}
+
+/// Visits complete, coalesced identities without retaining a display projection.
+///
+/// # Errors
+///
+/// Rejects malformed input, oversized identities, resource limits and visitor errors.
+pub fn visit_coalesced_path(
+    path: &Path,
+    memory_limit: u64,
+    mut visitor: impl FnMut(CoalescedIdentity) -> Result<(), MstatError>,
+) -> Result<MstatSummary, MstatError> {
+    let data = mmap_guard::map_file(path).map_err(|error| MstatError {
+        diagnostic: Box::new(Diagnostic::malformed("mstat.io", error.to_string())),
+    })?;
+    let mut inventory = Inventory::parse_filtered(&data, memory_limit, None)?;
+    inventory.sort_and_coalesce()?;
+    for section in &inventory.sections {
+        for record in &section.records {
+            let raw = inventory.identity_bytes(record.identity);
+            if raw.len() as u64 > (memory_limit / 64).min(16 * 1024 * 1024) {
+                return Err(resource_error("coalesced identity exceeds visitor budget"));
+            }
+            let decode = |bytes: &[u8]| {
+                let mut lossy = false;
+                let text = char::decode_utf16(
+                    bytes
+                        .chunks_exact(2)
+                        .map(|pair| u16::from_le_bytes([pair[0], pair[1]])),
+                )
+                .map(|scalar| {
+                    if let Ok(character) = scalar {
+                        character
+                    } else {
+                        lossy = true;
+                        char::REPLACEMENT_CHARACTER
+                    }
+                })
+                .collect::<String>();
+                (text, lossy)
+            };
+            let (identity, identity_lossy) = match record.identity.source {
+                IdentitySource::Names => (
+                    String::from_utf8_lossy(raw).into_owned(),
+                    std::str::from_utf8(raw).is_err(),
+                ),
+                IdentitySource::UserStrings => decode(raw),
+                IdentitySource::Owned => {
+                    let split = raw.iter().position(|byte| *byte == 0).ok_or_else(|| {
+                        malformed(
+                            "mstat.resource.identity",
+                            "missing resource separator",
+                            None,
+                        )
+                    })?;
+                    let (resource, lossy) = decode(&raw[split + 1..]);
+                    (
+                        format!("{}!{}", String::from_utf8_lossy(&raw[..split]), resource),
+                        lossy || std::str::from_utf8(&raw[..split]).is_err(),
+                    )
+                }
+            };
+            visitor(CoalescedIdentity {
+                stream: section.name.into(),
+                accounted: section.accounted,
+                identity,
+                raw_identity_blake3: blake3::hash(raw).to_hex().to_string(),
+                identity_lossy,
+                bytes: record.bytes,
+                records: record.records,
+            })?;
+        }
+    }
+    Ok(inventory.summary)
+}
+
+/// Ranks exact producer identities without demangling or guessing ownership.
+///
+/// # Errors
+///
+/// Returns a checked input, I/O, or resource-limit diagnostic.
+pub fn top_path(
+    path: &Path,
+    memory_limit: u64,
+    top: usize,
+    contains: Option<&str>,
+    stream: Option<&str>,
+) -> Result<MstatTop, MstatError> {
+    let data = mmap_guard::map_file(path).map_err(|error| {
+        let mut diagnostic = Diagnostic::malformed("mstat.io", error.to_string());
+        diagnostic.input_path = Some(path.to_owned());
+        MstatError {
+            diagnostic: Box::new(diagnostic),
+        }
+    })?;
+    top_entries(&data, memory_limit, top, contains, stream).map_err(|mut error| {
+        error.diagnostic.input_path = Some(path.to_owned());
+        error
+    })
+}
+
+/// In-memory ranking boundary for generated fixtures.
+///
+/// # Errors
+///
+/// Returns a malformed-input or resource diagnostic.
+pub fn top_entries(
+    bytes: &[u8],
+    memory_limit: u64,
+    top: usize,
+    contains: Option<&str>,
+    stream: Option<&str>,
+) -> Result<MstatTop, MstatError> {
+    if top == 0 || top as u64 > memory_limit / 8192 {
+        return Err(resource_error("MSTAT top count exceeds the report budget"));
+    }
+    if stream.is_some_and(|name| !REQUIRED_STREAMS.contains(&name)) {
+        return Err(malformed("mstat.stream", "unknown MSTAT stream", None));
+    }
+    if contains.is_some_and(|value| value.len() as u64 > (memory_limit / 64).min(1 << 20)) {
+        return Err(resource_error("MSTAT filter exceeds the memory budget"));
+    }
+    let reserve = top as u64 * 8192 + MIN_TRACKED_MEMORY;
+    let mut inventory =
+        Inventory::parse_filtered(bytes, memory_limit.saturating_sub(reserve), stream)?;
+    inventory.sort_and_coalesce()?;
+    let utf16_filter = contains.map(|value| {
+        value
+            .encode_utf16()
+            .flat_map(u16::to_le_bytes)
+            .collect::<Vec<_>>()
+    });
+    let utf8_finder = contains.map(|value| Finder::new(value.as_bytes()));
+    let utf16_finder = utf16_filter.as_deref().map(Finder::new);
+    let mut sections = Vec::new();
+    for (section, category) in inventory.sections.iter().zip(&inventory.summary.categories) {
+        if stream.is_some_and(|name| name != section.name) {
+            continue;
+        }
+        let mut selected = Vec::<usize>::new();
+        let mut matched_bytes = 0_u64;
+        let mut matched_identities = 0_u64;
+        let compare = |left: &usize, right: &usize| {
+            let left = &section.records[*left];
+            let right = &section.records[*right];
+            right.bytes.cmp(&left.bytes).then_with(|| {
+                inventory
+                    .identity_bytes(left.identity)
+                    .cmp(inventory.identity_bytes(right.identity))
+            })
+        };
+        for (index, record) in section.records.iter().enumerate() {
+            let identity = inventory.identity_bytes(record.identity);
+            if let (Some(needle), Some(utf16)) = (utf8_finder.as_ref(), utf16_finder.as_ref()) {
+                let matches = match record.identity.source {
+                    IdentitySource::Names => needle.find(identity).is_some(),
+                    IdentitySource::UserStrings => aligned_contains(utf16, identity),
+                    IdentitySource::Owned => {
+                        let split =
+                            identity.iter().position(|byte| *byte == 0).ok_or_else(|| {
+                                malformed("mstat.identity", "resource separator absent", None)
+                            })?;
+                        needle.find(&identity[..split]).is_some()
+                            || aligned_contains(utf16, &identity[split + 1..])
+                    }
+                };
+                if !matches {
+                    continue;
+                }
+            }
+            matched_bytes = matched_bytes
+                .checked_add(record.bytes)
+                .ok_or_else(|| malformed("mstat.top.size", "matched size overflow", None))?;
+            matched_identities += 1;
+            bounded_push(&mut selected, index, top, compare);
+        }
+        selected.sort_unstable_by(compare);
+        let entries = selected
+            .into_iter()
+            .map(|index| {
+                let record = &section.records[index];
+                let raw = inventory.identity_bytes(record.identity);
+                let (identity, truncated) = inventory.identity_preview(record.identity);
+                MstatTopEntry {
+                    identity,
+                    identity_bytes: raw.len() as u64,
+                    truncated,
+                    bytes: record.bytes,
+                    records: record.records,
+                }
+            })
+            .collect();
+        sections.push(MstatTopSection {
+            name: section.name.into(),
+            accounted: section.accounted,
+            total_bytes: category.aggregate_size_bytes,
+            matched_bytes,
+            matched_identities,
+            entries,
+        });
+    }
+    Ok(MstatTop {
+        schema: "vitnet.mstat-top.v1".into(),
+        accounted_size_bytes: inventory.summary.accounted_size_bytes,
+        peak_tracked_memory_bytes: inventory_tracked_bytes(&inventory) + reserve,
+        sections,
+    })
+}
+
+/// Comparator orders best first; the heap root is the worst retained item.
+fn bounded_push<T>(
+    heap: &mut Vec<T>,
+    value: T,
+    limit: usize,
+    compare: impl Fn(&T, &T) -> std::cmp::Ordering,
+) {
+    if limit == 0 {
+        return;
+    }
+    if heap.len() < limit {
+        heap.push(value);
+        let mut child = heap.len() - 1;
+        while child > 0 {
+            let parent = (child - 1) / 2;
+            if !compare(&heap[child], &heap[parent]).is_gt() {
+                break;
+            }
+            heap.swap(child, parent);
+            child = parent;
+        }
+    } else if compare(&value, &heap[0]).is_lt() {
+        heap[0] = value;
+        let mut parent = 0;
+        loop {
+            let left = parent * 2 + 1;
+            if left >= heap.len() {
+                break;
+            }
+            let right = left + 1;
+            let child = if right < heap.len() && compare(&heap[right], &heap[left]).is_gt() {
+                right
+            } else {
+                left
+            };
+            if !compare(&heap[child], &heap[parent]).is_gt() {
+                break;
+            }
+            heap.swap(child, parent);
+            parent = child;
+        }
+    }
 }
 
 #[derive(Debug, Error)]
@@ -427,18 +722,31 @@ pub fn summarize(bytes: &[u8], memory_limit: u64) -> Result<MstatSummary, MstatE
     })
 }
 
+fn inventory_category_records(category: &CategorySummary) -> u64 {
+    if category.name == "DeduplicatedMethods" {
+        category.items
+    } else {
+        category.records
+    }
+}
+
 impl<'a> Inventory<'a> {
     fn parse(bytes: &'a [u8], memory_limit: u64) -> Result<Self, MstatError> {
+        Self::parse_filtered(bytes, memory_limit, None)
+    }
+
+    fn parse_filtered(
+        bytes: &'a [u8],
+        memory_limit: u64,
+        stream: Option<&str>,
+    ) -> Result<Self, MstatError> {
         let summary = summarize(bytes, memory_limit.max(MIN_TRACKED_MEMORY))?;
         let expected_records = summary
             .categories
             .iter()
+            .filter(|category| stream.is_none_or(|name| name == category.name))
             .try_fold(0_u64, |total, category| {
-                total.checked_add(if category.name == "DeduplicatedMethods" {
-                    category.items
-                } else {
-                    category.records
-                })
+                total.checked_add(inventory_category_records(category))
             })
             .ok_or_else(|| malformed("mstat.diff.records", "record count overflow", None))?;
         let required = expected_records
@@ -490,11 +798,10 @@ impl<'a> Inventory<'a> {
             .iter_mut()
             .zip(&inventory.summary.categories)
         {
-            let count = if category.name == "DeduplicatedMethods" {
-                category.items
-            } else {
-                category.records
-            };
+            if stream.is_some_and(|name| name != section.name) {
+                continue;
+            }
+            let count = inventory_category_records(category);
             section
                 .records
                 .try_reserve_exact(usize::try_from(count).map_err(|_| {
@@ -514,6 +821,14 @@ impl<'a> Inventory<'a> {
                 continue;
             };
             let body = image.method_body(row.rva)?;
+            if stream.is_some_and(|selected| selected != name) {
+                // Summary already checks every record; resource identities also
+                // resolve AssemblyRef strings, even when not retained.
+                if name == "ManifestResources" {
+                    validate_resource_assembly_identities(body, &tables)?;
+                }
+                continue;
+            }
             decode_inventory_category(
                 name,
                 body,
@@ -579,22 +894,99 @@ impl<'a> Inventory<'a> {
     }
 
     fn identity_display(&self, identity: IdentityRef) -> String {
+        let (mut value, truncated) = self.identity_preview(identity);
+        if truncated {
+            value.push('…');
+        }
+        value
+    }
+
+    fn identity_preview(&self, identity: IdentityRef) -> (String, bool) {
         let bytes = self.identity_bytes(identity);
-        let value = match identity.source {
+        match identity.source {
             IdentitySource::UserStrings => {
                 let utf16 = bytes
                     .chunks_exact(2)
                     .map(|chunk| u16::from_le_bytes([chunk[0], chunk[1]]));
-                char::decode_utf16(utf16)
-                    .map(|scalar| scalar.unwrap_or(char::REPLACEMENT_CHARACTER))
-                    .collect::<String>()
+                bounded_identity(
+                    char::decode_utf16(utf16)
+                        .map(|scalar| scalar.unwrap_or(char::REPLACEMENT_CHARACTER)),
+                )
             }
-            IdentitySource::Names | IdentitySource::Owned => {
-                String::from_utf8_lossy(bytes).into_owned()
+            IdentitySource::Names => {
+                bounded_identity(String::from_utf8_lossy(&bytes[..bytes.len().min(260)]).chars())
             }
-        };
-        truncate_identity(value, 256)
+            IdentitySource::Owned => {
+                let split = bytes
+                    .iter()
+                    .position(|byte| *byte == 0)
+                    .expect("resource separator");
+                let assembly = String::from_utf8_lossy(&bytes[..split.min(260)]);
+                let resource = char::decode_utf16(
+                    bytes[split + 1..]
+                        .chunks_exact(2)
+                        .map(|chunk| u16::from_le_bytes([chunk[0], chunk[1]])),
+                )
+                .map(|scalar| scalar.unwrap_or(char::REPLACEMENT_CHARACTER));
+                bounded_identity(assembly.chars().chain(std::iter::once('!')).chain(resource))
+            }
+        }
     }
+}
+
+fn aligned_contains(finder: &Finder<'_>, value: &[u8]) -> bool {
+    if finder.needle().is_empty() {
+        return true;
+    }
+    let mut start = 0;
+    while let Some(relative) = finder.find(&value[start..]) {
+        let offset = start + relative;
+        if offset % 2 == 0 {
+            return true;
+        }
+        // An unaligned hit can overlap a subsequent aligned hit.
+        start = offset + 1;
+    }
+    false
+}
+
+#[cfg(test)]
+fn contains_bytes(value: &[u8], needle: &[u8], alignment: usize) -> bool {
+    needle.is_empty()
+        || value
+            .windows(needle.len())
+            .step_by(alignment)
+            .any(|part| part == needle)
+}
+
+fn bounded_identity(chars: impl Iterator<Item = char>) -> (String, bool) {
+    let mut value = String::new();
+    for character in chars {
+        if value.len() + character.len_utf8() > 256 {
+            return (value, true);
+        }
+        value.push(character);
+    }
+    (value, false)
+}
+
+fn validate_resource_assembly_identities(
+    body: MethodBody<'_>,
+    tables: &Tables<'_>,
+) -> Result<(), MstatError> {
+    let mut decoder = IlDecoder::new(body.code, body.file_offset);
+    while !decoder.is_empty() {
+        let token = u32::try_from(decoder.i4()?).map_err(|_| {
+            decoder.error(
+                "mstat.token",
+                "manifest-resource assembly token is negative",
+            )
+        })?;
+        tables.assembly_ref_parts(token)?;
+        decoder.string_token()?;
+        decoder.size()?;
+    }
+    Ok(())
 }
 
 fn decode_inventory_category(
@@ -1039,19 +1431,6 @@ fn inventory_tracked_bytes(inventory: &Inventory<'_>) -> u64 {
     records
         .saturating_add(owned)
         .saturating_add(inventory.tracked_memory_bytes.min(MIN_TRACKED_MEMORY))
-}
-
-fn truncate_identity(mut value: String, limit: usize) -> String {
-    if value.len() <= limit {
-        return value;
-    }
-    let mut end = limit;
-    while !value.is_char_boundary(end) {
-        end -= 1;
-    }
-    value.truncate(end);
-    value.push('…');
-    value
 }
 
 impl<'a> PeImage<'a> {
@@ -1548,6 +1927,15 @@ impl<'a> Tables<'a> {
     }
 
     fn assembly_ref_identity(&self, token: u32) -> Result<String, MstatError> {
+        let (name, culture) = self.assembly_ref_parts(token)?;
+        Ok(if culture.is_empty() {
+            name.to_owned()
+        } else {
+            format!("{name}, Culture={culture}")
+        })
+    }
+
+    fn assembly_ref_parts(&self, token: u32) -> Result<(&'a str, &'a str), MstatError> {
         self.validate_token(token, EntityKind::AssemblyRef)?;
         let row_index = usize::try_from((token & TOKEN_RID_MASK) - 1)
             .map_err(|_| malformed("mstat.token.rid", "assembly row exceeds usize", None))?;
@@ -1566,11 +1954,7 @@ impl<'a> Tables<'a> {
             name_offset + self.string_width,
             self.string_width,
         )?)?;
-        Ok(if culture.is_empty() {
-            name.to_owned()
-        } else {
-            format!("{name}, Culture={culture}")
-        })
+        Ok((name, culture))
     }
 }
 
@@ -2147,6 +2531,56 @@ fn resource_error(message: impl Into<String>) -> MstatError {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn bounded_heap_matches_exact_order_at_every_limit_and_insertion_order() {
+        let values: Vec<_> = (0..40)
+            .map(|index| (index % 5, format!("{}-{index:03}", "日".repeat(100))))
+            .collect();
+        let compare = |left: &usize, right: &usize| {
+            values[*right]
+                .0
+                .cmp(&values[*left].0)
+                .then_with(|| values[*left].1.as_bytes().cmp(values[*right].1.as_bytes()))
+        };
+        let mut expected: Vec<_> = (0..values.len()).collect();
+        expected.sort_unstable_by(compare);
+        for limit in 0..=values.len() + 1 {
+            for reverse in [false, true] {
+                let mut heap = Vec::new();
+                for index in 0..values.len() {
+                    bounded_push(
+                        &mut heap,
+                        if reverse {
+                            values.len() - 1 - index
+                        } else {
+                            index
+                        },
+                        limit,
+                        compare,
+                    );
+                }
+                heap.sort_unstable_by(compare);
+                assert_eq!(heap, expected[..limit.min(expected.len())]);
+            }
+        }
+    }
+
+    #[test]
+    fn identity_previews_bound_utf8_and_filters_respect_utf16_alignment() {
+        let (value, truncated) = bounded_identity("日".repeat(100).chars());
+        assert_eq!(value.len(), 255);
+        assert_eq!(value.chars().count(), 85);
+        assert!(truncated);
+        assert_eq!(
+            bounded_identity("a".repeat(256).chars()),
+            ("a".repeat(256), false)
+        );
+        assert!(bounded_identity("a".repeat(257).chars()).1);
+        assert!(!contains_bytes(&[0, 65, 0, 1], &[65, 0], 2));
+        assert!(contains_bytes(&[65, 0, 1, 0], &[65, 0], 2));
+        assert!(contains_bytes(b"assembly", b"", 1));
+    }
 
     #[test]
     fn fingerprint_collision_falls_back_to_exact_identity_bytes() {

@@ -1,5 +1,33 @@
 # MSTAT v2.2 summary format
 
+## Component insight reports
+
+The checked `insights` API builds one shared exact inventory for method
+components, resources, literal cohorts and generic-shaped name families.
+Its library schema is `vitnet.mstat-insights.v1`; CLI projections/envelopes
+are documented in [bloat analysis](../bloat-analysis.md).
+
+Methods retain and coalesce the three actual producer size fields separately.
+Top plus omitted component/byte totals equal matched totals. Accounted basis
+points use the complete Methods + Types + Blobs denominator.
+
+Resources resolve exact AssemblyRef name/culture and UTF-16 resource names.
+Assembly/culture/name projections each reconcile independently; `accounted`
+is false because resource bytes overlap Blobs. Complete keys determine group
+identity before display limiting.
+
+Cohorts OR case-sensitive literal predicates within each rule, intersect any
+complete-identity filter, and optionally restrict one exact stream. The report
+separates accounted/non-accounted counts, unions, multiply-matched identities
+and pairwise intersections; overlapping cohort sums are not byte ownership.
+Generic-shaped families use the exact prefix before the first literal `<` in
+Methods/Types identities. Ordinary and shaped totals reconcile, but this is
+explicitly a name heuristic, not a guessed demangling grammar.
+
+`metadata_blob_bytes` and `metadata_blob_records` count only the complete
+UTF-16 Blobs name exactly equal to `Metadata`, before filtering/top projection.
+Absence and a present zero-sized blob remain distinguishable.
+
 `vitnet mstat summary` reads the NativeAOT MSTAT v2.2 format. MSTAT is a
 managed PE whose assembly version identifies the format. Seven synthetic
 global `MethodDef` rows carry compact IL instruction streams:
@@ -26,6 +54,13 @@ v2, the producer deliberately also includes RVA fields, frozen regions, and
 manifest resources in `Blobs` for compatibility with v2.0 readers. Adding the
 newer breakdown streams again would double-count them. Each breakdown is still
 reported independently.
+
+These are logical object-data sizes, not executable file sizes. With producer
+dehydration enabled, hydration targets preserve their zero-filled logical
+lengths in an uninitialized section while a separate `DehydratedData` blob holds
+their encoded representation. Neither that blob nor the target lengths are
+independent estimates of removable disk bytes. The pinned producer evidence is
+recorded in [format provenance](../format-provenance.md).
 
 `Methods.aggregate_size_bytes` includes method body, GC-info, and EH-info
 bytes. `DeduplicatedMethods.items` is the folded-method count. Summary mode
@@ -77,6 +112,24 @@ body. The summary and diff contracts therefore report exact group and folded
 method counts while leaving `estimated_savings_bytes` as `null` rather than
 inventing a size from the surviving body. Folding data remains separate from
 accounted totals.
+
+## Contributor ranking contract
+
+`mstat top` emits `vitnet.mstat-top.v1`, including accounted size, tracked
+inventory charge and producer-ordered sections. Each section contains
+`accounted`, `total_bytes`, `matched_bytes`, `matched_identities`, and bounded
+entries with `identity`, original `identity_bytes`, `truncated`, `bytes`, and
+coalesced `records`. Ranking is descending bytes then complete identity bytes.
+`--stream` selects one of the seven exact stream names; `--contains` matches
+complete case-sensitive identities, never truncated displays. No match is a
+valid empty result with an unchanged section total.
+
+Resource identities display as `assembly!resource`, decoding the resource
+suffix from UTF-16. Blob/resource filters respect UTF-16 code-unit alignment.
+Previews stop at a UTF-8 boundary and mark truncation by rendered length rather
+than guessing from UTF-16 byte counts. Raw identity equality and diff matching
+are unchanged. Like diff, top retains a compact record inventory; it is not the
+constant-state summary decoder.
 
 ## Independent tiny fixture map
 

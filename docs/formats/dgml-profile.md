@@ -1,5 +1,33 @@
 # NativeAOT DGML profile
 
+## Extended evidence queries
+
+`dgml incoming` emits `vitnet.dgml-incoming.v1`: the target node, its exact
+total incoming-edge count, a bounded `edges` page, generation, stop and timing.
+Each edge has a zero-based row `ordinal`, `source_id`, optional `source` node
+(`null` if absent), `target_id`, reason preview, original reason byte count and
+truncation flag. Resume after `next_after_edge` with the same generation.
+Parallel edges remain separate and source-to-target direction is unchanged.
+
+`dgml batch` emits `vitnet.dgml-batch.v1`: requested count, input-order Why
+reports, generation and shared examined-edge/visited-node totals. All IDs use
+the same locked generation. Time, edges and visits are budgets for the entire
+batch. A complete batch can still contain bounded/partial individual witnesses;
+their own stop fields remain authoritative.
+
+Search v1 adds optional `rank` (`id` or `incoming`), `matched_nodes`,
+`matched_incoming_edges`, and `omitted_matches`. Ordinary ID-ordered pagination
+is unchanged. `--count-all` or incoming ranking continues past the display
+limit, computing exact totals and deterministic top candidates over the scanned
+range. Incoming ties use ascending numeric ID. Complete means that range was
+exhausted; work/time stops imply partial counts and partial rankings. Generation
+guards also apply to incoming and batch. All four graph-query commands support
+the optional named-pipe daemon. See [bloat analysis](../bloat-analysis.md).
+
+Search samples its soft deadline before each batch of at most 64 numeric slots.
+Slot limits remain exact. File I/O, one bounded text read, and output projection
+are not preemptible; `--timeout-ms` is not a hard real-time guarantee.
+
 `vitnet dgml stats` accepts the XML subset emitted by NativeAOT's dependency
 graph writer. It processes the document with a pull parser and does not build
 an XML DOM or retain labels or edges.
@@ -104,8 +132,40 @@ Cache info, verification, and pruning reports respectively use
 `vitnet.dgml-cache-prune.v1`.
 
 The format is an independent vitnet design, not an interoperability contract
-with another analyzer. Outgoing-edge files, optional property sidecars, and
-Phase 5 query contracts are not yet implemented.
+with another analyzer. Outgoing-edge files and optional property sidecars are
+not yet implemented.
+
+## Bounded query contracts
+
+`dgml search` emits `vitnet.dgml-search.v1`: generation, query, bounded entries,
+scanned slot count, next numeric `after_id`, stop reason and elapsed milliseconds.
+Each entry contains ID, preview, full label byte length, truncation and incoming
+edge count. Modes are `id`, `exact`, `prefix` and `contains`; optional case folding
+is Unicode lowercase, not locale-aware collation. Numeric order is deterministic.
+Limits cap slots, time and output, not the completeness of matched labels.
+`next_after_id: null` means complete; otherwise repeat with the cursor and
+generation token. A changed generation rejects the page rather than silently
+mixing datasets. UTF-8 preview boundaries never alter matching.
+
+`dgml why` emits `vitnet.dgml-why.v1`: node, shortest incoming BFS paths,
+root-kind classification, original reason previews, visited/edge/repeated/
+missing counts, explicit stop reason, generation and time. The path is ordered
+root-to-requested-node; `reasons[i]` connects `nodes[i]` to `nodes[i+1]`.
+`nativeaot_empty_reason_root` follows the producer convention;
+`zero_in_degree_candidate` is structural evidence only. No paths with
+`complete` can mean a cycle, not that the node is unreferenced. BFS visits each
+present ID once and does not enumerate every parallel alternative path.
+Partial stops are `max_depth`, `max_visited`, `max_edges`, `max_paths` or
+`timeout`. Combined conditional nodes require both prerequisites; a single
+witness is not a proof of sufficient root cause. Parallel `reason_bytes` and
+`reasons_truncated` arrays expose reason-preview boundaries without altering
+the original prefix or inventing an ellipsis as part of the producer reason.
+
+Session opening checks manifest/file lengths. Query reads check encountered
+record ranges, flags, CSR bounds and returned UTF-8. Full hash verification
+is explicit via `cache verify`, not repeated on every tiny query. Queries hold
+a shared generation lock throughout; retained daemon sessions prevent rebuild
+or pruning until eviction/shutdown. Minimum query memory is 16 MiB.
 
 ## Requirement evidence
 
@@ -134,3 +194,7 @@ is run explicitly in release mode using the command in the README.
 | Wider merge fan-in activates at the exact large-sort-budget threshold | `index::tests::merge_fan_in_expands_only_with_a_large_sort_budget` |
 | 101 GiB logical graph with exact parallel-edge count and bounded state | `index::tests::indexes_101_gib_logical_graph_with_bounded_state` |
 | Optional local corpora with final ingestion guards and expected counts | `index::tests::validates_optional_local_corpus_with_final_ingestion_guards` |
+| Full-label matching, numeric sparse IDs and bounded keyset pages | `search_pages_full_labels_by_numeric_cursor_and_handles_sparse_ids` |
+| Scan limits, stale generation, invalid ID/options and cache shapes | `search_reports_work_limits_and_rejects_generation_and_corruption` |
+| Root witness direction/reasons, traversal caps and reader locks | `why_preserves_reason_direction_bounds_and_reader_lifetime` |
+| Cycles and unresolved source endpoints | `why_terminates_cycles_and_reports_unresolved_sources` |

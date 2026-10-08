@@ -6,6 +6,7 @@ members = [
     "crates/vitnet-metadata",
     "crates/vitnet-report",
     "crates/vitnet-cli",
+    "crates/vitnet-attribution",
 ]
 resolver = "2"
 exclude = ["fuzz"]
@@ -25,6 +26,7 @@ ctrlc = "3.4"
 fs4 = "1.1"
 fst = "0.4"
 mmap-guard = "0.2"
+memchr = "2.8"
 mimalloc = "=0.1.52"
 proptest = "1.6"
 quick-xml = "=0.42.0"
@@ -39,6 +41,7 @@ vitnet-dgml = { version = "0.1.0", path = "crates/vitnet-dgml" }
 vitnet-mstat = { version = "0.1.0", path = "crates/vitnet-mstat" }
 vitnet-metadata = { version = "0.1.0", path = "crates/vitnet-metadata" }
 vitnet-report = { version = "0.1.0", path = "crates/vitnet-report" }
+vitnet-attribution = { version = "0.1.0", path = "crates/vitnet-attribution" }
 
 [workspace.lints.rust]
 unsafe_code = "forbid"

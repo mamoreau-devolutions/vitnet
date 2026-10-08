@@ -1,0 +1,23 @@
+{
+  "schema": "vitnet.evidence.v1",
+  "label": "minimal offline dependency example",
+  "provenance": {
+    "configuration": "synthetic example; no measured build"
+  },
+  "packages": [
+    {
+      "target": "net10.0/win-x64",
+      "id": "Example.Application",
+      "version": "1.0.0",
+      "direct": true,
+      "dependencies": ["Example.Contracts/2.0.0"]
+    },
+    {
+      "target": "net10.0/win-x64",
+      "id": "Example.Contracts",
+      "version": "2.0.0",
+      "direct": false,
+      "dependencies": []
+    }
+  ]
+}

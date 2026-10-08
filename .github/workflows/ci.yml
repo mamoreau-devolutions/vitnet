@@ -18,6 +18,13 @@ jobs:
       - run: cargo fmt --all -- --check
       - run: cargo clippy --workspace --all-targets --all-features -- -D warnings
       - run: cargo test --workspace
+      - name: Check bundled explorer scripts
+        shell: pwsh
+        run: |
+          node --check (Join-Path $PWD 'crates\vitnet-cli\src\explorer\assets\app.js')
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          node --check (Join-Path $PWD 'crates\vitnet-cli\src\explorer\assets\layout.js')
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
       - run: cargo check --manifest-path fuzz/Cargo.toml --bins
 
   policy:
@@ -27,3 +34,18 @@ jobs:
       - uses: EmbarkStudios/cargo-deny-action@v2
       - run: cargo deny check
       - run: cargo deny --manifest-path fuzz/Cargo.toml check
+
+  evidence:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 10.0.401
+      - run: dotnet restore --locked-mode --nologo --verbosity quiet
+        working-directory: tools/vitnet-evidence
+      - run: dotnet build --no-restore --nologo --verbosity quiet
+        working-directory: tools/vitnet-evidence
+      - run: pwsh -NoProfile -File tools\vitnet-evidence\check-policy.ps1
+      - run: pwsh -NoProfile -File tools\vitnet-evidence\smoke.ps1
+      - run: pwsh -NoProfile -File tools\vitnet-evidence\regression.ps1

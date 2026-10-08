@@ -1,5 +1,63 @@
 use proptest::prelude::*;
-use vitnet_mstat::{diff, summarize};
+use vitnet_mstat::{diff, summarize, top_entries};
+
+mod insights_cases;
+
+#[test]
+fn top_identities_coalesce_sizes_filter_exact_bytes_and_mark_overlapping_streams() {
+    let fixture = fixture();
+    let report = top_entries(&fixture.bytes, 1024 * 1024, 2, None, None).unwrap();
+    assert_eq!(report.schema, "vitnet.mstat-top.v1");
+    assert_eq!(report.accounted_size_bytes, 66);
+    assert_eq!(report.sections[0].entries[0].bytes, 13);
+    assert_eq!(report.sections[0].entries[0].identity, "a");
+    assert!(report.sections[0].accounted);
+    let frozen = &report.sections[4];
+    assert!(!frozen.accounted);
+    assert_eq!(frozen.matched_bytes, 11);
+    assert_eq!(frozen.entries[0].bytes, 11);
+    assert_eq!(frozen.entries[0].records, 2);
+    let resource = &report.sections[5].entries[0];
+    assert!(!resource.identity.contains('\0'));
+    assert!(resource.identity.ends_with('!'));
+    assert!(!resource.truncated);
+    let filtered = top_entries(
+        &fixture.bytes,
+        1024 * 1024,
+        1,
+        Some("a"),
+        Some("FrozenObjects"),
+    )
+    .unwrap();
+    assert_eq!(filtered.sections.len(), 1);
+    assert_eq!(filtered.sections[0].matched_bytes, 11);
+    assert_eq!(filtered.sections[0].entries[0].identity, "a");
+    let empty = top_entries(
+        &fixture.bytes,
+        1024 * 1024,
+        1,
+        Some("absent"),
+        Some("Methods"),
+    )
+    .unwrap();
+    assert_eq!(empty.sections[0].matched_identities, 0);
+    assert_eq!(empty.sections[0].entries, Vec::new());
+    assert_eq!(empty.sections[0].total_bytes, 13);
+    assert!(
+        top_entries(&fixture.bytes, 65536, 100, None, None)
+            .unwrap_err()
+            .diagnostic
+            .code
+            .starts_with("resource.")
+    );
+    assert_eq!(
+        top_entries(&fixture.bytes, 1024 * 1024, 1, None, Some("Invalid"))
+            .unwrap_err()
+            .diagnostic
+            .code,
+        "mstat.stream"
+    );
+}
 
 const FILE_ALIGNMENT: usize = 0x200;
 const TEXT_RVA: u32 = 0x2000;
@@ -153,6 +211,32 @@ proptest! {
 }
 
 fn fixture() -> Fixture {
+    let fixture = fixture_with(
+        &[
+            methods_body(),
+            types_body(),
+            blobs_body(),
+            rva_fields_body(),
+            frozen_objects_body(),
+            resources_body(),
+            deduplicated_body(),
+        ],
+        &[1, b'a', 1, b'b'],
+        &[0_u8, 1, 0, 1, 0],
+        &[("", "")],
+    );
+    assert_eq!(fixture.bytes.len(), 0x800);
+    assert_eq!(fixture.names_offset, 0x600);
+    assert_eq!(fixture.methods_code_offset, FILE_ALIGNMENT + 0x20c + 1);
+    fixture
+}
+
+fn fixture_with(
+    bodies: &[Vec<u8>; 7],
+    producer_names: &[u8],
+    user_strings: &[u8],
+    assembly_refs: &[(&str, &str)],
+) -> Fixture {
     let names = [
         "Methods",
         "Types",
@@ -168,37 +252,57 @@ fn fixture() -> Fixture {
         .map(|name| push_string(&mut strings, name))
         .collect::<Vec<_>>();
     let assembly_name = push_string(&mut strings, "tiny.mstat");
-
-    let bodies = [
-        methods_body(),
-        types_body(),
-        blobs_body(),
-        rva_fields_body(),
-        frozen_objects_body(),
-        resources_body(),
-        deduplicated_body(),
-    ];
+    let references = assembly_refs
+        .iter()
+        .map(|(name, culture)| {
+            let name = if name.is_empty() {
+                0
+            } else {
+                push_string(&mut strings, name)
+            };
+            let culture = if culture.is_empty() {
+                0
+            } else {
+                push_string(&mut strings, culture)
+            };
+            (name, culture)
+        })
+        .collect::<Vec<_>>();
     let placeholder_rvas = [0_u32; 7];
-    let placeholder_metadata = metadata(&strings, &name_offsets, assembly_name, &placeholder_rvas);
+    let placeholder_metadata = metadata(
+        &strings,
+        &name_offsets,
+        assembly_name,
+        &placeholder_rvas,
+        user_strings,
+        &references,
+    );
     let bodies_offset = align4(METADATA_OFFSET + placeholder_metadata.len());
     let mut relative = bodies_offset;
     let mut method_rvas = [0_u32; 7];
     for (index, body) in bodies.iter().enumerate() {
         relative = align4(relative);
         method_rvas[index] = TEXT_RVA + u32::try_from(relative).unwrap();
-        relative += 1 + body.len();
+        relative += body_header_size(body) + body.len();
     }
-    let metadata = metadata(&strings, &name_offsets, assembly_name, &method_rvas);
+    let metadata = metadata(
+        &strings,
+        &name_offsets,
+        assembly_name,
+        &method_rvas,
+        user_strings,
+        &references,
+    );
     assert_eq!(metadata.len(), placeholder_metadata.len());
-    assert_eq!(metadata.len(), 393);
 
     let text_size = align(relative, FILE_ALIGNMENT);
     let names_raw_offset = FILE_ALIGNMENT + text_size;
-    assert_eq!(bodies_offset, 0x20c);
-    assert_eq!(names_raw_offset, 0x600);
-    let mut bytes = vec![0_u8; names_raw_offset + FILE_ALIGNMENT];
-    assert_eq!(bytes.len(), 0x800);
+    let names_raw_size = align(producer_names.len().max(1), FILE_ALIGNMENT);
+    let mut bytes = vec![0_u8; names_raw_offset + names_raw_size];
     write_pe_headers(&mut bytes, text_size, names_raw_offset);
+    let names_section = 0x98 + 0xe0 + 40;
+    write_u32(&mut bytes, names_section + 8, as_u32(producer_names.len()));
+    write_u32(&mut bytes, names_section + 16, as_u32(names_raw_size));
     write_cli_header(&mut bytes, metadata.len());
     bytes[FILE_ALIGNMENT + METADATA_OFFSET..FILE_ALIGNMENT + METADATA_OFFSET + metadata.len()]
         .copy_from_slice(&metadata);
@@ -208,14 +312,23 @@ fn fixture() -> Fixture {
     for (index, body) in bodies.iter().enumerate() {
         body_offset = align4(body_offset);
         let file_offset = FILE_ALIGNMENT + body_offset;
-        bytes[file_offset] = u8::try_from(body.len() << 2).unwrap() | 2;
-        bytes[file_offset + 1..file_offset + 1 + body.len()].copy_from_slice(body);
-        if index == 0 {
-            methods_code_offset = file_offset + 1;
+        let header_size = body_header_size(body);
+        if header_size == 1 {
+            bytes[file_offset] = u8::try_from(body.len() << 2).unwrap() | 2;
+        } else {
+            write_u16(&mut bytes, file_offset, 0x3003);
+            write_u16(&mut bytes, file_offset + 2, 8);
+            write_u32(&mut bytes, file_offset + 4, as_u32(body.len()));
         }
-        body_offset += 1 + body.len();
+        bytes[file_offset + header_size..file_offset + header_size + body.len()]
+            .copy_from_slice(body);
+        if index == 0 {
+            methods_code_offset = file_offset + header_size;
+        }
+        body_offset += header_size + body.len();
     }
-    bytes[names_raw_offset..names_raw_offset + 4].copy_from_slice(&[1, b'a', 1, b'b']);
+    bytes[names_raw_offset..names_raw_offset + producer_names.len()]
+        .copy_from_slice(producer_names);
 
     Fixture {
         bytes,
@@ -224,9 +337,19 @@ fn fixture() -> Fixture {
     }
 }
 
-fn metadata(strings: &[u8], names: &[u32], assembly_name: u32, method_rvas: &[u32; 7]) -> Vec<u8> {
-    let tables = tables(names, assembly_name, method_rvas);
-    let user_strings = [0_u8, 1, 0, 1, 0];
+fn body_header_size(body: &[u8]) -> usize {
+    if body.len() < 64 { 1 } else { 12 }
+}
+
+fn metadata(
+    strings: &[u8],
+    names: &[u32],
+    assembly_name: u32,
+    method_rvas: &[u32; 7],
+    user_strings: &[u8],
+    references: &[(u32, u32)],
+) -> Vec<u8> {
+    let tables = tables(names, assembly_name, method_rvas, references);
     let root_size = 76;
     let strings_offset = root_size + tables.len();
     let user_strings_offset = strings_offset + strings.len();
@@ -251,11 +374,16 @@ fn metadata(strings: &[u8], names: &[u32], assembly_name: u32, method_rvas: &[u3
     assert_eq!(bytes.len(), root_size);
     bytes.extend_from_slice(&tables);
     bytes.extend_from_slice(strings);
-    bytes.extend_from_slice(&user_strings);
+    bytes.extend_from_slice(user_strings);
     bytes
 }
 
-fn tables(names: &[u32], assembly_name: u32, method_rvas: &[u32; 7]) -> Vec<u8> {
+fn tables(
+    names: &[u32],
+    assembly_name: u32,
+    method_rvas: &[u32; 7],
+    references: &[(u32, u32)],
+) -> Vec<u8> {
     let mut bytes = Vec::new();
     push_u32(&mut bytes, 0);
     bytes.extend_from_slice(&[2, 0, 0, 1]);
@@ -263,7 +391,7 @@ fn tables(names: &[u32], assembly_name: u32, method_rvas: &[u32; 7]) -> Vec<u8> 
         (1_u64 << 0) | (1_u64 << 2) | (1_u64 << 4) | (1_u64 << 6) | (1_u64 << 32) | (1_u64 << 35);
     push_u64(&mut bytes, valid);
     push_u64(&mut bytes, 0);
-    for count in [1_u32, 1, 1, 7, 1, 1] {
+    for count in [1_u32, 1, 1, 7, 1, as_u32(references.len())] {
         push_u32(&mut bytes, count);
     }
 
@@ -303,7 +431,12 @@ fn tables(names: &[u32], assembly_name: u32, method_rvas: &[u32; 7]) -> Vec<u8> 
     push_u16(&mut bytes, u16::try_from(assembly_name).unwrap());
     push_u16(&mut bytes, 0);
 
-    bytes.extend_from_slice(&[0; 20]);
+    for (name, culture) in references {
+        bytes.extend_from_slice(&[0; 14]);
+        push_u16(&mut bytes, u16::try_from(*name).unwrap());
+        push_u16(&mut bytes, u16::try_from(*culture).unwrap());
+        push_u16(&mut bytes, 0);
+    }
     bytes
 }
 
