@@ -1,6 +1,10 @@
 //! Bounded, local-only evidence workspaces and offline HTML reports.
 
+mod catalog;
+mod cli;
 pub mod data;
+mod glossary;
+mod ranking;
 pub mod server;
 
 use crate::{AppError, Cli};
@@ -20,6 +24,40 @@ pub const MAX_SCANNED: u64 = 100_000;
 
 #[derive(Clone, Debug, Subcommand)]
 pub enum ExploreCommand {
+    /// Show the accounted ledger, physical evidence and overlapping projections.
+    Summary { bundle: PathBuf },
+    /// Page the complete byte ranking, not the bounded snapshot top list.
+    Contributors(cli::ContributorArgs),
+    /// List every captured dataset, including supplemental and graph inventories.
+    Datasets(cli::DatasetArgs),
+    /// Search or page one complete captured dataset.
+    Records(cli::RecordArgs),
+    /// Follow recorded assembly/package origins (not retention or removable bytes).
+    Origins(cli::OriginArgs),
+    /// Navigate a captured record, source candidates or parsed producer shape.
+    Inspect(cli::InspectArgs),
+    /// Explain one contributor with connected recorded evidence and next commands.
+    Explain(cli::ExplainArgs),
+    /// Compare compact ledgers from two captured builds, not identity savings.
+    Compare { before: PathBuf, after: PathBuf },
+    /// Distinguish captured evidence coverage from bounded snapshot previews.
+    Coverage { bundle: PathBuf },
+    /// Browse the pinned compiler glossary without opening a bundle.
+    Glossary(cli::GlossaryArgs),
+    /// Suggest concrete investigations based only on captured build facts.
+    Guide { bundle: PathBuf },
+    /// Rank evidence-backed opportunities, not predicted removable bytes.
+    Opportunities(cli::OpportunityArgs),
+    /// Inspect reconciled assembly/package budgets with explicit attribution tiers.
+    Budgets(cli::BudgetArgs),
+    /// Browse connected owner, XAML, serializer, generic, reflection and metadata lenses.
+    Lenses(cli::LensArgs),
+    /// Reconcile a feature's owner ledger with explicit batch bounds and uncertainty.
+    Footprint(cli::FeatureArgs),
+    /// Group bounded retention witnesses for one to three representative identities.
+    CohortRetention(cli::CohortArgs),
+    /// Annotate a selected compiler node's bounded root witnesses with source evidence.
+    Retention(cli::RetentionArgs),
     /// Stream complete evidence once into an immutable, bounded browsing bundle.
     Prepare {
         index: PathBuf,
@@ -30,6 +68,9 @@ pub enum ExploreCommand {
         evidence: Vec<PathBuf>,
         #[arg(long)]
         before: Option<PathBuf>,
+        /// Optional local feature/pattern policy; never executable code.
+        #[arg(long)]
+        opportunity_policy: Option<PathBuf>,
         /// Include at most three selected offline retention witnesses.
         #[arg(long, value_delimiter = ',')]
         node: Vec<u64>,
@@ -117,6 +158,12 @@ pub(super) fn html(snapshot: &serde_json::Value, offline: bool) -> Result<String
             "/*VITNET_WORKER*/null",
             &serde_json::to_string(include_str!("assets/layout.js")).map_err(AppError::Json)?,
         )
+        .replace("/*VITNET_FORMAT*/", include_str!("assets/format.js"))
+        .replace(
+            "/*VITNET_INVESTIGATION*/",
+            &include_str!("assets/investigation.js")
+                .replace("/*VITNET_BUCKETS*/{}", include_str!("assets/buckets.json")),
+        )
         .replace("/*VITNET_APP*/", include_str!("assets/app.js"))
         .replacen("/*VITNET_DATA*/null", &data, 1);
     Ok(if offline {
@@ -165,10 +212,11 @@ pub fn execute(
             bundle,
             evidence,
             before,
+            opportunity_policy,
             node,
             graph,
         } => {
-            let manifest = data::prepare(
+            let manifest = data::prepare_with_policy(
                 index,
                 bundle,
                 evidence,
@@ -177,6 +225,7 @@ pub fn execute(
                 graph,
                 cli.memory_limit.0,
                 control,
+                opportunity_policy.as_deref(),
             )?;
             serde_json::to_string_pretty(&manifest).map_err(AppError::Json)
         }
@@ -218,5 +267,6 @@ pub fn execute(
             data::verify(bundle, cli.memory_limit.0)?;
             Ok("Explorer bundle and original identity cache verified.".into())
         }
+        _ => cli::execute(cli, command, control),
     }
 }

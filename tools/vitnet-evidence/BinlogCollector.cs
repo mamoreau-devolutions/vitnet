@@ -19,6 +19,7 @@ internal static class BinlogCollector
     {
         public string Path { get; set; } = "";
         public string Assembly { get; set; } = "";
+        public Dictionary<string, string> Properties { get; } = new(StringComparer.Ordinal);
     }
 
     private sealed class CompilerRoute
@@ -27,6 +28,7 @@ internal static class BinlogCollector
         public string? CommandLine { get; set; }
         public string? OutputAssembly { get; set; }
         public CSharpParseOptions? ParseOptions { get; set; }
+        public string? GeneratedDirectory { get; set; }
         public HashSet<string> Sources { get; } = new(CollectionContext.PathComparer);
         public HashSet<string> References { get; } = new(CollectionContext.PathComparer);
         public HashSet<string> Analyzers { get; } = new(CollectionContext.PathComparer);
@@ -70,6 +72,7 @@ internal static class BinlogCollector
             throw new CollectionException("binlog.gzip_truncated", "Missing/invalid single-member gzip CRC or length trailer.", path);
         expanded.Position = 0;
         var projects = new Dictionary<(int Node, int Project), ProjectRoute>();
+        var evaluations = new Dictionary<(int Node, int Evaluation), ProjectRoute>();
         var compilers = new Dictionary<(int Node, int Project, int Task), CompilerRoute>();
         var reader = new BinLogReader();
         reader.OnFileFormatVersionRead += version => context.Fact($"binlog.format:{path}", version.ToString(System.Globalization.CultureInfo.InvariantCulture));
@@ -113,8 +116,12 @@ internal static class BinlogCollector
                     if (string.IsNullOrWhiteSpace(started.ProjectFile))
                         throw new CollectionException("binlog.project", "Project-start record lacks a project path.", path);
                     var project = new ProjectRoute { Path = Resolve(started.ProjectFile, Path.GetDirectoryName(path)!) };
+                    if (eventContext is not null && evaluations.TryGetValue((eventContext.NodeId, eventContext.EvaluationId), out var recordedEvaluation) &&
+                        CollectionContext.PathComparer.Equals(recordedEvaluation.Path, project.Path))
+                        foreach (var property in recordedEvaluation.Properties) project.Properties[property.Key] = property.Value;
                     projects[projectKey] = project;
                     Properties(context, project, started.Properties, $"start:{projectKey}");
+                    Properties(context, project, started.GlobalProperties, $"start_global:{projectKey}");
                     context.Artifact("source", project.Path);
                     context.Available(project.Path);
                     break;
@@ -123,6 +130,7 @@ internal static class BinlogCollector
                     var evaluation = new ProjectRoute { Path = Resolve(evaluated.ProjectFile, Path.GetDirectoryName(path)!) };
                     Properties(context, evaluation, evaluated.Properties, $"evaluation:{eventContext?.EvaluationId}");
                     Properties(context, evaluation, evaluated.GlobalProperties, $"evaluation_global:{eventContext?.EvaluationId}");
+                    if (eventContext is not null) evaluations[(eventContext.NodeId, eventContext.EvaluationId)] = evaluation;
                     break;
                 case TaskStartedEventArgs started when started.TaskName == "Csc":
                     if (!projects.TryGetValue(projectKey, out var owner))
@@ -149,6 +157,8 @@ internal static class BinlogCollector
                             case "References": compiler.References.Add(Resolve(value, directory)); break;
                             case "Analyzers": compiler.Analyzers.Add(Resolve(value, directory)); break;
                             case "OutputAssembly": compiler.OutputAssembly = Resolve(value, directory); break;
+                            case "GeneratedFilesOutputPath": case "GeneratedFilesOutputDirectory":
+                                compiler.GeneratedDirectory = Resolve(value, directory); break;
                         }
                     }
                     break;
@@ -186,11 +196,27 @@ internal static class BinlogCollector
             foreach (var analyzer in compiler.Analyzers.Order(StringComparer.Ordinal))
             {
                 var identity = PeCollector.Reference(context, analyzer);
+                if (identity is not null)
+                {
+                    context.AnalyzerVersions[analyzer] = identity.Value.Version;
+                    context.AnalyzerNames[analyzer] = identity.Value.Name;
+                }
+                context.Count();
+                context.Evidence.GeneratorRuns.Add(new(identity?.Name ?? Path.GetFileNameWithoutExtension(analyzer),
+                    identity?.Version, analyzer, NullIfEmpty(compiler.Project.Path), NullIfEmpty(assembly),
+                    compiler.OutputAssembly, ProjectValue(compiler, "Configuration"), ProjectValue(compiler, "TargetFramework"),
+                    "analyzer_referenced", "binlog_csc_analyzer_input", []));
                 if (identity is null) continue;
-                context.AnalyzerVersions[analyzer] = identity.Value.Version;
                 context.Count();
                 context.Evidence.Mappings.Add(new("analyzer", analyzer, identity.Value.Name, [], "binlog_csc_analyzer_input"));
             }
+            var generatedDirectory = compiler.GeneratedDirectory;
+            if (generatedDirectory is null && ProjectValue(compiler, "CompilerGeneratedFilesOutputPath") is { } recordedDirectory)
+                generatedDirectory = Resolve(recordedDirectory, compiler.Project.Path.Length == 0 ? Path.GetDirectoryName(path)! : Path.GetDirectoryName(compiler.Project.Path)!);
+            context.Count();
+            context.GeneratorRoutes.Add(new(NullIfEmpty(compiler.Project.Path), NullIfEmpty(assembly), compiler.OutputAssembly,
+                ProjectValue(compiler, "Configuration"), ProjectValue(compiler, "TargetFramework"), generatedDirectory,
+                compiler.Sources, compiler.Analyzers));
             context.Diagnostic("binlog.analyzer_execution_unknown", "Analyzer inputs are recorded; listing a DLL does not prove which generator ran or what annotation caused output.", path);
         }
         if (compilers.Count == 0)
@@ -216,6 +242,7 @@ internal static class BinlogCollector
     private static void Property(CollectionContext context, ProjectRoute project, string key, string value, string scope)
     {
         if (key == "AssemblyName") project.Assembly = value;
+        if (FactProperties.Contains(key)) project.Properties[key] = value;
         if (FactProperties.Contains(key))
             context.Fact($"binlog.property:{project.Path}:{scope}:{key}", value);
     }
@@ -235,6 +262,7 @@ internal static class BinlogCollector
         }
         var parsed = CSharpCommandLineParser.Default.Parse(tokens, directory, sdkDirectory: null, additionalReferenceDirectories: null);
         compiler.ParseOptions = parsed.ParseOptions;
+        compiler.GeneratedDirectory ??= parsed.GeneratedFilesOutputDirectory;
         foreach (var source in parsed.SourceFiles) compiler.Sources.Add(Resolve(source.Path, directory));
         foreach (var reference in parsed.MetadataReferences) compiler.References.Add(Resolve(reference.Reference, directory));
         foreach (var analyzer in parsed.AnalyzerReferences) compiler.Analyzers.Add(Resolve(analyzer.FilePath, directory));
@@ -247,4 +275,7 @@ internal static class BinlogCollector
     }
 
     private static string Resolve(string path, string directory) => Path.GetFullPath(path, directory);
+    private static string? NullIfEmpty(string value) => string.IsNullOrWhiteSpace(value) ? null : value;
+    private static string? ProjectValue(CompilerRoute compiler, string key) =>
+        compiler.Project.Properties.GetValueOrDefault(key) is { Length: > 0 } value && !value.Contains("$(", StringComparison.Ordinal) ? value : null;
 }

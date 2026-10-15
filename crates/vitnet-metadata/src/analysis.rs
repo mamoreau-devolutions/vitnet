@@ -106,6 +106,22 @@ pub struct StringEntry {
     pub preview: Preview,
     pub bytes: u64,
     pub logical_offset: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub assembly: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub namespace: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub type_name: Option<String>,
+}
+
+impl StringEntry {
+    fn charge(&self) -> u64 {
+        (self.preview.text.len()
+            + self.assembly.as_ref().map_or(0, String::len)
+            + self.namespace.as_ref().map_or(0, String::len)
+            + self.type_name.as_ref().map_or(0, String::len)) as u64
+            + 160
+    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -513,6 +529,13 @@ impl StreamingAnalyzer {
         }
         self.selected_lower_bound = self.selected_lower_bound.saturating_add(bytes);
         add_counter(&mut self.by_kind, record.kind, bytes);
+        let string_owner = record.string_preview.as_ref().map(|_| {
+            (
+                record.context.assembly,
+                record.context.namespace,
+                record.context.type_name,
+            )
+        });
         if let Some(assembly) = record.context.assembly {
             add_counter(&mut self.by_assembly, assembly, bytes);
         }
@@ -529,6 +552,17 @@ impl StreamingAnalyzer {
                 preview,
                 bytes,
                 logical_offset: record.logical_offset,
+                assembly: string_owner
+                    .as_ref()
+                    .and_then(|owner| owner.0)
+                    .map(|id| display(self.identifiers.get(id))),
+                namespace: string_owner
+                    .as_ref()
+                    .and_then(|owner| owner.1)
+                    .map(|id| display(self.identifiers.get(id))),
+                type_name: string_owner
+                    .and_then(|owner| owner.2)
+                    .map(|id| display(self.identifiers.get(id))),
             };
             let position = self
                 .strings
@@ -539,9 +573,9 @@ impl StreamingAnalyzer {
             if self.strings.len() == self.options.top
                 && let Some(removed) = self.strings.pop()
             {
-                self.string_charge -= removed.preview.text.len() as u64 + 64;
+                self.string_charge -= removed.charge();
             }
-            self.string_charge += entry.preview.text.len() as u64 + 64;
+            self.string_charge += entry.charge();
             self.strings.insert(position, entry);
         }
     }
@@ -761,6 +795,9 @@ pub fn analyze(records: &[MetadataRecord], options: &AnalysisOptions) -> Analysi
                 preview: preview_bytes(&record.name, options.preview_bytes),
                 bytes: *bytes,
                 logical_offset: record.logical_offset,
+                assembly: record.assembly.as_ref().map(|value| display(value)),
+                namespace: record.namespace.as_ref().map(|value| display(value)),
+                type_name: record.type_name.as_ref().map(|value| display(value)),
             });
         }
     }

@@ -34,6 +34,7 @@ pub struct Matcher<'a> {
     assemblies: HashMap<String, BTreeSet<String>>,
     sources: HashMap<String, Vec<usize>>,
     explicit: HashMap<(&'a str, &'a str), Vec<usize>>,
+    managed: HashMap<(String, String), Vec<usize>>,
 }
 
 impl<'a> Matcher<'a> {
@@ -68,12 +69,162 @@ impl<'a> Matcher<'a> {
                 .or_default()
                 .push(index);
         }
+        let mut managed: HashMap<(String, String), Vec<usize>> = HashMap::new();
+        for (index, source) in evidence.sources.iter().enumerate() {
+            managed
+                .entry((
+                    source.assembly.clone(),
+                    Self::normalized_type(&source.type_name),
+                ))
+                .or_default()
+                .push(index);
+        }
         Self {
             evidence,
             assemblies,
             sources,
             explicit,
+            managed,
         }
+    }
+
+    /// Uses captured artifact-local token candidates before opaque spelling fallbacks.
+    ///
+    /// # Errors
+    ///
+    /// Rejects corrupt sidecar rows or exhausted lookup bounds.
+    pub fn locate_entry(
+        &self,
+        entry: &CoalescedIdentity,
+        symbols: Option<&mut crate::SymbolLookup>,
+    ) -> Result<SourceMatch, AttributionError> {
+        let Some(symbols) = symbols else {
+            return Ok(locate_entry(self, entry));
+        };
+        let candidates = symbols.get(&entry.stream, &entry.raw_identity_blake3)?;
+        self.locate_symbols(entry, &candidates)
+    }
+
+    /// Joins resolved managed owners while retaining signature/owner conflicts.
+    ///
+    /// # Errors
+    ///
+    /// Rejects candidates with wrong raw identity keys or unsupported resolution discriminators.
+    pub fn locate_symbols(
+        &self,
+        entry: &CoalescedIdentity,
+        candidates: &[serde_json::Value],
+    ) -> Result<SourceMatch, AttributionError> {
+        if candidates.is_empty()
+            || self
+                .explicit
+                .contains_key(&(entry.stream.as_str(), entry.identity.as_str()))
+        {
+            return Ok(locate_entry(self, entry));
+        }
+        let mut resolutions = BTreeSet::new();
+        let mut assemblies = BTreeSet::new();
+        let mut source_indices = BTreeSet::new();
+        let mut unresolved = false;
+        for candidate in candidates {
+            if candidate["stream"].as_str() != Some(&entry.stream)
+                || candidate["raw_identity_blake3"].as_str() != Some(&entry.raw_identity_blake3)
+            {
+                return Err(error(
+                    "symbols.integrity",
+                    "symbol candidate belongs to another raw identity",
+                ));
+            }
+            let resolution = &candidate["resolution"];
+            match resolution["status"].as_str() {
+                Some("unresolved") => {
+                    unresolved = true;
+                    continue;
+                }
+                Some("resolved") => {}
+                _ => {
+                    return Err(error(
+                        "symbols.schema",
+                        "unsupported symbol resolution status",
+                    ));
+                }
+            }
+            let Some(assembly) = resolution["assembly"].as_str() else {
+                unresolved = true;
+                continue;
+            };
+            let complete_assembly = assembly;
+            let assembly = assembly.split(',').next().unwrap_or(assembly).trim();
+            let declaring = resolution["declaring_type"]
+                .as_str()
+                .ok_or_else(|| error("symbols.schema", "resolved symbol lacks declaring type"))?;
+            let member = resolution["member_name"].as_str();
+            let signature = resolution["signature"]
+                .as_str()
+                .ok_or_else(|| error("symbols.schema", "resolved symbol lacks signature"))?;
+            resolutions.insert((
+                complete_assembly.to_owned(),
+                declaring.to_owned(),
+                member.map(str::to_owned),
+                signature.to_owned(),
+            ));
+            assemblies.insert(assembly.to_owned());
+            if let Some(indices) = self
+                .managed
+                .get(&(assembly.to_owned(), Self::normalized_type(declaring)))
+            {
+                for index in indices {
+                    let source = &self.evidence.sources[*index];
+                    let source_member = source
+                        .member
+                        .as_deref()
+                        .map(|name| name.split('(').next().unwrap_or(name));
+                    if source_member.is_none() || source_member == member {
+                        source_indices.insert(*index);
+                    }
+                }
+            }
+        }
+        if unresolved {
+            let mut fallback = locate_entry(self, entry);
+            if fallback.assemblies.is_empty() {
+                fallback.status = "unmapped_symbol_candidates".into();
+            } else if !assemblies.is_empty() {
+                assemblies.extend(fallback.assemblies);
+                fallback.assemblies = assemblies.into_iter().collect();
+                if fallback.assemblies.len() > 1 {
+                    fallback.status = "ambiguous".into();
+                }
+            }
+            fallback.basis.push_str("; captured token resolution is incomplete/unsupported. Remaining spelling associations are candidates, not verified typed ownership; inspect complete token evidence.");
+            return Ok(fallback);
+        }
+        Ok(SourceMatch {
+                status: if resolutions.len() == 1 { "managed_symbol_join" } else { "managed_symbol_ambiguous" }.into(),
+                basis: "MSTAT-artifact-local ECMA-335 owner/signature join keyed by complete stream/raw-name hash. Source declarations remain independently captured name candidates; source/build checksum equality is not established by this join.".into(),
+                assemblies: assemblies.into_iter().collect(),
+                sources: source_indices.into_iter().map(|index| self.evidence.sources[index].clone()).collect(),
+            })
+    }
+
+    fn normalized_type(value: &str) -> String {
+        let mut result = String::new();
+        let mut depth = 0_u32;
+        let mut arity = false;
+        for character in value.trim_start_matches("global::").chars() {
+            match character {
+                '<' => depth += 1,
+                '>' if depth > 0 => depth -= 1,
+                _ if depth > 0 => {}
+                '`' => arity = true,
+                '0'..='9' if arity => {}
+                _ => {
+                    arity = false;
+                    result.push(if character == '+' { '.' } else { character });
+                }
+            }
+        }
+        result
     }
 
     #[allow(clippy::too_many_lines)]
@@ -469,6 +620,9 @@ pub fn asset_duplicates(
 ) -> Result<Vec<ResourceDuplicate>, AttributionError> {
     let mut groups: BTreeMap<String, Vec<Resource>> = BTreeMap::new();
     for resource in resources {
+        if resource.is_container() {
+            continue;
+        }
         if let Some(hash) = &resource.sha256 {
             if hash.len() != 64 || !hash.bytes().all(|byte| byte.is_ascii_hexdigit()) {
                 return Err(error(
@@ -536,6 +690,11 @@ pub fn report(
     let index = open_index(directory, memory_limit)?;
     let evidence = &index.evidence;
     let matcher = Matcher::new(evidence);
+    let mut symbols = index
+        .symbols
+        .as_ref()
+        .map(|descriptor| crate::SymbolLookup::open(directory, descriptor, memory_limit))
+        .transpose()?;
     let mut coverage = BTreeMap::<String, u64>::new();
     let mut assembly_groups = BTreeMap::new();
     let mut package_groups = BTreeMap::new();
@@ -559,7 +718,7 @@ pub fn report(
     }
     let mut malformed_shapes = 0;
     visit_identities(directory, &index, memory_limit, |entry| {
-        let located = locate_entry(&matcher, entry);
+        let located = matcher.locate_entry(entry, symbols.as_mut())?;
         if entry.accounted {
             let value = coverage.entry(located.status.clone()).or_default();
             *value = value
@@ -712,12 +871,12 @@ pub fn report(
     });
     let full_resource_asset_bytes = resources
         .iter()
-        .filter(|resource| resource.storage != "manifest_container")
+        .filter(|resource| !resource.is_container())
         .try_fold(0_u64, |sum, resource| sum.checked_add(resource.bytes))
         .ok_or_else(|| error("attribution.size", "resource inventory byte overflow"))?;
     let full_resource_container_bytes = resources
         .iter()
-        .filter(|resource| resource.storage == "manifest_container")
+        .filter(|resource| resource.is_container())
         .try_fold(0_u64, |sum, resource| sum.checked_add(resource.bytes))
         .ok_or_else(|| error("attribution.size", "resource container byte overflow"))?;
     let mut duplicate_assets = asset_duplicates(&resources)?;
@@ -828,12 +987,17 @@ pub fn locate_source(
 ) -> Result<SourceReport, AttributionError> {
     let index: AttributionIndex = open_index(directory, memory_limit)?;
     let matcher = Matcher::new(&index.evidence);
+    let mut symbols = index
+        .symbols
+        .as_ref()
+        .map(|descriptor| crate::SymbolLookup::open(directory, descriptor, memory_limit))
+        .transpose()?;
     let mut contributors = Vec::new();
     let mut associations = Vec::new();
     visit_identities(directory, &index, memory_limit, |entry| {
         if entry.identity == identity {
             contributors.push(entry.clone());
-            associations.push(locate_entry(&matcher, entry));
+            associations.push(matcher.locate_entry(entry, symbols.as_mut())?);
         }
         Ok(())
     })?;

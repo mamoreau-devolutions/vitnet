@@ -65,6 +65,7 @@ p { margin: 0 0 12px; }
 .scope-bar button { min-height: 28px; font-size: 12px; padding: 2px 8px; }
 .workspace { display: grid; grid-template-columns: minmax(0, 1.7fr) minmax(320px, 1fr); gap: 16px; align-items: start; }
 .panel { background: var(--panel); border: 1px solid var(--rule); border-radius: 5px; padding: 20px; min-width: 0; }
+.opportunity-card { padding: 12px 0; border-top: 1px solid var(--rule); }
 .inspector { position: sticky; top: 16px; max-height: calc(100vh - 32px); overflow: auto; }
 .inspector .identity { font: 12px/1.6 ui-monospace, Consolas, monospace; padding: 10px; background: var(--bg); border: 1px solid var(--rule); border-radius: 4px; white-space: pre-wrap; overflow-wrap: anywhere; }
 .toolbar { display: flex; gap: 10px; align-items: end; flex-wrap: wrap; margin: 14px 0; }
@@ -85,6 +86,11 @@ tr.selected { background: var(--accent-soft); }
 .pagination { display: flex; justify-content: space-between; flex-wrap: wrap; align-items: center; gap: 10px; font-size: 12px; margin-top: 12px; }
 .empty { color: var(--muted); background: var(--bg); padding: 16px; border: 1px dashed var(--rule); border-radius: 4px; }
 .budget-row { margin: 16px 0; }
+.budget-scale { display: block; width: 180px; height: 12px; }
+.scale-remainder { fill: var(--bar-other); }
+.scale-value { fill: var(--bar); }
+.inventory-table table { min-width: 760px; }
+.inventory-table td { min-width: 90px; }
 .budget-heading { display: flex; justify-content: space-between; gap: 10px; font-size: 12px; }
 .icicle { width: 100%; height: auto; display: block; margin-top: 8px; }
 .icicle-node rect { fill: var(--bar); stroke: var(--panel); stroke-width: 1; }

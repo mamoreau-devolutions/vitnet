@@ -1,4 +1,4 @@
-use crate::{AppError, BatchArgs, Cli, FormatArg};
+use crate::{AppError, BatchArgs, Cli, FormatArg, display};
 use clap::Subcommand;
 use serde::Serialize;
 use std::fmt::Write as _;
@@ -76,24 +76,23 @@ fn json<T: Serialize>(cli: &Cli, value: &T) -> Result<String, AppError> {
 fn report_table(report: &AttributionReport) -> String {
     let mut text = format!(
         "Build evidence: {}\nAccounted MSTAT bytes: {}\n",
-        report.label,
-        report
-            .accounted_bytes
-            .map_or_else(|| "unknown".into(), |bytes| bytes.to_string())
+        display::text(&report.label),
+        display::optional(report.accounted_bytes)
     );
     writeln!(
         text,
-        "Metadata lower bound: {}",
-        report
-            .metadata_lower_bound_bytes
-            .map_or_else(|| "unknown".into(), |bytes| bytes.to_string())
+        "Metadata lower bound (overlapping MSTAT): {}",
+        display::optional(report.metadata_lower_bound_bytes)
     )
     .unwrap();
     for group in &report.metadata_type_sources {
         writeln!(
             text,
-            "{:>16} {} [{}]",
-            group.lower_bound_bytes, group.qualified_type, group.status
+            "{:>16} {:>9} {} [{}]",
+            display::bytes(group.lower_bound_bytes),
+            display::percent(group.lower_bound_bytes, report.metadata_lower_bound_bytes),
+            display::text(&group.qualified_type),
+            group.status
         )
         .unwrap();
         for source in &group.sources {
@@ -102,18 +101,27 @@ fn report_table(report: &AttributionReport) -> String {
     }
     text.push_str("\nComplete accounting mapping coverage (candidate != verified)\n");
     for (status, bytes) in &report.accounted_mapping_bytes {
-        writeln!(text, "{bytes:>16}  {status}").unwrap();
+        writeln!(
+            text,
+            "{:>16} {:>9}  {status}",
+            display::bytes(*bytes),
+            display::percent(*bytes, report.accounted_bytes)
+        )
+        .unwrap();
     }
     for (heading, groups) in [
         ("Assembly associations", &report.assembly_groups),
         ("Package associations", &report.package_groups),
     ] {
-        writeln!(text, "\n{heading} (bounded display)").unwrap();
+        writeln!(text, "\n{heading} (bounded display; evidence-tiered associations, not exclusive ownership)\nSize              % total   Name / evidence").unwrap();
         for group in groups {
             writeln!(
                 text,
-                "{:>16}  {} [{}]",
-                group.bytes, group.name, group.mapping_status
+                "{:>16} {:>9}  {} [{}]",
+                display::bytes(group.bytes),
+                display::percent(group.bytes, report.accounted_bytes),
+                display::text(&group.name),
+                group.mapping_status
             )
             .unwrap();
         }
@@ -122,8 +130,16 @@ fn report_table(report: &AttributionReport) -> String {
     for contributor in &report.contributors {
         writeln!(
             text,
-            "{} {:>12} {} [{}]",
-            contributor.stream, contributor.bytes, contributor.identity, contributor.sources.status
+            "{} {:>12} {:>9} {} [{}]",
+            contributor.stream,
+            display::bytes(contributor.bytes),
+            if matches!(contributor.stream.as_str(), "Methods" | "Types" | "Blobs") {
+                display::percent(contributor.bytes, report.accounted_bytes)
+            } else {
+                "Overlap".into()
+            },
+            display::text(&contributor.identity),
+            contributor.sources.status
         )
         .unwrap();
         for source in &contributor.sources.sources {
@@ -140,29 +156,34 @@ fn report_table(report: &AttributionReport) -> String {
             .unwrap();
         }
     }
-    text.push_str("\nGenerator amplification (associated bytes, not build-tool DLL size)\n");
+    text.push_str("\nGenerator amplification (recorded evidence, not execution counts or build-tool DLL size)\n");
     for generator in &report.generators {
         writeln!(
             text,
-            "{} {}: {} inputs, {} emitted files, {} declarations; candidate={} asserted={} B",
+            "{} {}: {} recorded inputs, {} recorded files, {} declarations; candidate={} asserted={}",
             generator.name,
             generator.version,
             generator.declared_inputs,
             generator.generated_files,
             generator.generated_declarations,
-            generator.candidate_accounted_bytes,
-            generator.asserted_accounted_bytes
+            display::exact(generator.candidate_accounted_bytes),
+            display::exact(generator.asserted_accounted_bytes)
         )
         .unwrap();
     }
-    text.push_str("\nGeneric families (distinct parsed shapes, not instantiation counts)\n");
+    text.push_str("\nGeneric families (overlapping projection; distinct parsed shapes, not instantiation counts)\n");
     for family in &report.generic_families {
         writeln!(
             text,
-            "{} {:>12} {}: {} shapes, {} shared shapes, kinds={:?}",
+            "{} {:>12} {:>9} {}: {} shapes, {} shared shapes, kinds={:?}",
             family.stream,
-            family.bytes,
-            family.family,
+            display::bytes(family.bytes),
+            if matches!(family.stream.as_str(), "Methods" | "Types" | "Blobs") {
+                display::percent(family.bytes, report.accounted_bytes)
+            } else {
+                "Overlap".into()
+            },
+            display::text(&family.family),
             family.distinct_shapes,
             family.canonical_shared_shapes,
             family.argument_kinds
@@ -171,17 +192,21 @@ fn report_table(report: &AttributionReport) -> String {
     }
     writeln!(
         text,
-        "\nResource rows: visible={} B; complete assets={} B, containers={} B (overlap)",
-        report.displayed_resource_bytes,
-        report.full_resource_asset_bytes,
-        report.full_resource_container_bytes
+        "\nResource rows: visible={}; complete assets={}, containers={} (overlap; do not add to accounted total)",
+        display::exact(report.displayed_resource_bytes),
+        display::exact(report.full_resource_asset_bytes),
+        display::exact(report.full_resource_container_bytes)
     )
     .unwrap();
     for resource in &report.resources {
         writeln!(
             text,
             "{:>16} {}!{}!{} [{}]",
-            resource.bytes, resource.assembly, resource.container, resource.name, resource.storage
+            display::bytes(resource.bytes),
+            display::text(&resource.assembly),
+            display::text(&resource.container),
+            display::text(&resource.name),
+            resource.storage
         )
         .unwrap();
     }

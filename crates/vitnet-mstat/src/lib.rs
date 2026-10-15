@@ -8,6 +8,8 @@ use vitnet_core::{Diagnostic, ResourceBudget};
 
 mod insights;
 pub use insights::*;
+mod symbols;
+pub use symbols::*;
 
 const MIN_TRACKED_MEMORY: u64 = 64 * 1024;
 const PE_SIGNATURE: &[u8; 4] = b"PE\0\0";
@@ -1867,6 +1869,10 @@ impl<'a> Tables<'a> {
             32 => 16 + blob + string * 2,
             34 => 12,
             35 => 12 + blob * 2 + string * 2,
+            41 => table_index(2) * 2,
+            42 => 4 + coded(&[2, 6], 1) + string,
+            43 => coded(&[6, 10], 1) + blob,
+            44 => table_index(42) + coded(&[2, 1, 27], 2),
             _ if self.rows[table] == 0 => 0,
             _ => {
                 return Err(malformed(

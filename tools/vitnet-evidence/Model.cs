@@ -9,7 +9,10 @@ public sealed class Evidence
     public List<Package> Packages { get; } = [];
     public List<Assembly> Assemblies { get; } = [];
     public List<Source> Sources { get; } = [];
+    public List<XamlDocument> XamlDocuments { get; } = [];
     public List<Generator> Generators { get; } = [];
+    public List<GeneratorRun> GeneratorRuns { get; } = [];
+    public List<GeneratorLink> GeneratorLinks { get; } = [];
     public List<Resource> Resources { get; } = [];
     public List<Binary> Binaries { get; } = [];
     public List<Mapping> Mappings { get; } = [];
@@ -22,9 +25,26 @@ public sealed record Assembly(string Name, string Path, string? Package, List<Ma
 public sealed record ManagedType(string Name, string Kind, ulong Members);
 public sealed record Source(
     string Assembly, string TypeName, string? Member, string Path, ulong Line, ulong EndLine,
-    string Kind, List<string> Attributes, string? GeneratedBy = null, string? Sha256 = null);
+    string Kind, List<string> Attributes, string? GeneratedBy = null, string? Sha256 = null,
+    List<SourceAnnotation>? Annotations = null);
+public sealed record SourceAnnotation(string Target, List<string> Attributes);
+public sealed record XamlDocument(
+    string Path, string Assembly, string? DeclaredClass, string RootElement, string Sha256,
+    List<string> Includes, List<string> Keys);
 public sealed record Generator(
     string Name, string Version, string AssemblyPath, List<string> GeneratedFiles, List<string> InputSymbols);
+public sealed record GeneratorRun(
+    string Name, string? Version, string? AssemblyPath, string? ProjectPath,
+    string? TargetAssembly, string? TargetAssemblyPath, string? Configuration, string? TargetFramework,
+    string Status, string Basis, List<GeneratorOutput> Outputs, string ExecutionStatus = "not_observed");
+public sealed record GeneratorOutput(
+    string Path, string? Sha256, string BuildMatch, List<GeneratorChecksum> PdbChecksums);
+public sealed record GeneratorChecksum(
+    string PdbPath, string Algorithm, string Checksum, string Status, string AssemblyMatch,
+    string? TargetAssembly = null, string? TargetAssemblyPath = null);
+public sealed record GeneratorLink(
+    string Generator, string OutputPath, string? TriggerSource, string? TriggerType,
+    string? TriggerMember, string? TriggerSymbol, string Rule, string EvidenceTier, string Basis);
 public sealed record Resource(
     string Assembly, string Container, string Name, ulong Bytes, string? Sha256, string? SourcePath, string Storage);
 public sealed record Binary(string Path, string Format, string Architecture, ulong FileBytes, List<BinarySection> Sections);

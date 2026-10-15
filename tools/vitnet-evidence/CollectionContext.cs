@@ -15,10 +15,14 @@ internal sealed class CollectionContext(Options options)
     public Evidence Evidence { get; } = new() { Label = options.Label };
     public Dictionary<string, HashSet<string>> SourceAssemblies { get; } = new(PathComparer);
     public Dictionary<string, string> AnalyzerVersions { get; } = new(PathComparer);
+    public Dictionary<string, string> AnalyzerNames { get; } = new(PathComparer);
     public Dictionary<string, HashSet<string>> AssemblyPackages { get; } = new(PathComparer);
     public Dictionary<string, CSharpParseOptions> SourceParseOptions { get; } = new(PathComparer);
     public HashSet<string> SourceScans { get; } = new(StringComparer.Ordinal);
     public HashSet<string> PdbScans { get; } = new(PathComparer);
+    public HashSet<string> GeneratedRoots { get; } = new(PathComparer);
+    public Dictionary<string, List<GeneratorChecksum>> DocumentChecksums { get; } = new(PathComparer);
+    public List<GeneratorCompilerRoute> GeneratorRoutes { get; } = [];
 
     public void Count(long count = 1)
     {
@@ -161,3 +165,7 @@ internal sealed class CollectionContext(Options options)
         Evidence.Resources.Add(new(assembly, container, name, (ulong)data.Length, Hash(data), path, storage));
     }
 }
+
+internal sealed record GeneratorCompilerRoute(
+    string? ProjectPath, string? TargetAssembly, string? TargetAssemblyPath, string? Configuration,
+    string? TargetFramework, string? GeneratedDirectory, HashSet<string> Sources, HashSet<string> Analyzers);

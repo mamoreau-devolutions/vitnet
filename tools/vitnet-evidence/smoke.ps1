@@ -1,7 +1,7 @@
-param([switch]$Keep)
+param([switch]$Keep, [string]$ScratchRoot = $PSScriptRoot)
 $ErrorActionPreference = 'Stop'
 $root = $PSScriptRoot
-$fixture = Join-Path $root '.smoke'
+$fixture = Join-Path $ScratchRoot '.smoke'
 $utf8 = [System.Text.UTF8Encoding]::new($false)
 function Write-Fixture([string]$Path, [string]$Value) {
     [System.IO.File]::WriteAllText((Join-Path $fixture $Path), $Value, $utf8)

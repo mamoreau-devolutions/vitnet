@@ -310,6 +310,37 @@ fn render<T: Serialize>(format: FormatArg, report: &T) -> Result<String, AppErro
 #[cfg(test)]
 mod tests;
 
+fn table_scalar(name: &str, value: &Value) -> String {
+    let decimal = value
+        .as_str()
+        .map_or_else(|| value.to_string(), str::to_owned);
+    if name == "bytes" || name.ends_with("_bytes") {
+        if value.is_null() {
+            return "Unknown".into();
+        }
+        if (name.contains("delta") || name.contains("_minus_"))
+            && let Ok(bytes) = decimal.parse::<i128>()
+        {
+            return crate::display::signed(bytes);
+        }
+        if let Ok(bytes) = decimal.parse::<u128>() {
+            return crate::display::wide_exact(bytes);
+        }
+        if let Ok(bytes) = decimal.parse::<i128>() {
+            return crate::display::signed(bytes);
+        }
+    }
+    if name.ends_with("_basis_points") {
+        if value.is_null() {
+            return "Unknown".into();
+        }
+        if let Ok(share) = decimal.parse::<u128>() {
+            return crate::display::basis_points(share);
+        }
+    }
+    crate::display::text(&decimal)
+}
+
 fn table_value(value: &Value, depth: usize, output: &mut String) {
     let indent = "  ".repeat(depth);
     match value {
@@ -319,14 +350,10 @@ fn table_value(value: &Value, depth: usize, output: &mut String) {
                     writeln!(output, "{indent}{name}:").unwrap();
                     table_value(value, depth + 1, output);
                 } else {
-                    writeln!(
-                        output,
-                        "{indent}{name}: {}",
-                        value
-                            .as_str()
-                            .map_or_else(|| value.to_string(), str::to_owned)
-                    )
-                    .unwrap();
+                    let label = name
+                        .strip_suffix("_basis_points")
+                        .map_or_else(|| name.clone(), |name| format!("{name}_percent"));
+                    writeln!(output, "{indent}{label}: {}", table_scalar(name, value)).unwrap();
                 }
             }
         }

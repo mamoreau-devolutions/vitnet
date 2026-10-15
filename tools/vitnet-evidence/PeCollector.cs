@@ -59,7 +59,7 @@ internal static class PeCollector
                     throw new CollectionException("resource.collector.pdb_expanded", "Embedded PDB expanded byte budget exceeded.", path);
                 using var provider = pe.ReadEmbeddedPortablePdbDebugDirectoryData(debug);
                 context.Fact($"pdb.embedded:{path}", "portable");
-                ReadPdb(context, provider.GetMetadataReader(), reader, name, path, Path.GetDirectoryName(path)!);
+                ReadPdb(context, provider.GetMetadataReader(), reader, name, path, Path.GetDirectoryName(path)!, path, "pe_identity_verified");
                 found = true;
             }
             else if (debug.Type == DebugDirectoryEntryType.CodeView)
@@ -72,7 +72,7 @@ internal static class PeCollector
                 context.Artifact("pdb", pdb);
                 if (context.Available(pdb))
                 {
-                    Pdb(context, pdb, reader, name, new BlobContentId(codeView.Guid, debug.Stamp));
+                    Pdb(context, pdb, reader, name, new BlobContentId(codeView.Guid, debug.Stamp), path);
                     found = true;
                 }
             }
@@ -157,7 +157,7 @@ internal static class PeCollector
         }
     }
 
-    public static void Pdb(CollectionContext context, string path, MetadataReader? assemblyReader, string assembly, BlobContentId? expected = null)
+    public static void Pdb(CollectionContext context, string path, MetadataReader? assemblyReader, string assembly, BlobContentId? expected = null, string? assemblyPath = null)
     {
         if (!context.PdbScans.Add(path)) return;
         context.Artifact("pdb", path);
@@ -187,16 +187,19 @@ internal static class PeCollector
             throw new CollectionException("pdb.malformed", "Metadata is not a portable PDB.", path);
         var id = new BlobContentId(pdb.DebugMetadataHeader.Id);
         context.Fact($"pdb.identity:{path}", $"{id.Guid:D}/{id.Stamp}");
+        var assemblyMatch = expected.HasValue ? "pe_identity_verified" : "unverified";
         if (expected.HasValue && id != expected.Value)
         {
             context.Diagnostic("pdb.identity_mismatch", "PDB does not match the PE CodeView identity; no assembly/member attribution is assigned.", path);
             assemblyReader = null;
             assembly = "";
+            assemblyMatch = "pe_identity_mismatch";
         }
-        ReadPdb(context, pdb, assemblyReader, assembly, path, Path.GetDirectoryName(path)!);
+        ReadPdb(context, pdb, assemblyReader, assembly, path, Path.GetDirectoryName(path)!, assemblyPath, assemblyMatch);
     }
 
-    private static void ReadPdb(CollectionContext context, MetadataReader pdb, MetadataReader? assemblyReader, string assembly, string pdbPath, string baseDirectory)
+    private static void ReadPdb(CollectionContext context, MetadataReader pdb, MetadataReader? assemblyReader, string assembly,
+        string pdbPath, string baseDirectory, string? assemblyPath, string assemblyMatch)
     {
         var documents = new Dictionary<DocumentHandle, (string Path, string? Hash)>();
         foreach (var handle in pdb.Documents)
@@ -212,6 +215,9 @@ internal static class PeCollector
             context.Fact($"pdb.document:{pdbPath}:{rawPath}", $"algorithm={algorithm:D};checksum={recordedHash}");
             context.Artifact("source", path);
             string? hash = null;
+            var checksumStatus = "unavailable";
+            var algorithmName = algorithm == new Guid("8829d00f-11b8-4213-878b-770e8597ac16") ? "sha256" :
+                algorithm == new Guid("ff1816ec-aa5e-4d10-87f7-6f4963833460") ? "sha1" : algorithm.ToString("D");
             if (context.Available(path))
             {
                 var data = context.ReadBytes(path);
@@ -222,7 +228,13 @@ internal static class PeCollector
                     context.Diagnostic("pdb.document_drift", "Available source checksum differs from the PDB document.", path);
                 if (actual is null)
                     context.Diagnostic("pdb.checksum_unknown", "Document checksum algorithm is unsupported.", path);
+                checksumStatus = actual is null ? "unsupported" : actual == recordedHash ? "matched" : "drift";
             }
+            if (!context.DocumentChecksums.TryGetValue(path, out var checksums))
+                context.DocumentChecksums[path] = checksums = [];
+            context.Count();
+            checksums.Add(new(pdbPath, algorithmName, recordedHash, checksumStatus, assemblyMatch,
+                assembly.Length == 0 ? null : assembly, assemblyPath));
             documents.Add(handle, (path, hash));
         }
         foreach (var handle in pdb.MethodDebugInformation)

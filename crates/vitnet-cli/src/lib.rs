@@ -21,6 +21,7 @@ use vitnet_report::{InputDescriptor, MetadataComparisonEnvelope, MetadataEnvelop
 
 mod attribution_cli;
 pub mod daemon;
+mod display;
 pub mod explorer;
 mod insights_cli;
 pub use attribution_cli::AttributionCommand;
@@ -82,7 +83,7 @@ pub struct Cli {
 
 #[derive(Clone, Debug, Subcommand)]
 pub enum Command {
-    /// Prepare, export and browse bounded local evidence workspaces.
+    /// Inspect complete captured evidence in the terminal or bounded local browser.
     Explore(PlaceholderCommand<explorer::ExploreCommand>),
     /// Import and query generic build, source, package and generator evidence.
     Attribution(PlaceholderCommand<AttributionCommand>),
@@ -606,21 +607,40 @@ fn execute_mstat(cli: &Cli, command: &MstatCommand) -> Result<String, AppError> 
                     .map(|lines| lines.join("\n")),
                 FormatArg::Table => {
                     let mut output = format!(
-                        "MSTAT accounted size: {} B\nIdentities are opaque producer symbols, not DGML IDs. Breakdowns overlap accounted streams.\n",
-                        report.accounted_size_bytes
+                        "MSTAT accounted size: {}\nIdentities are opaque producer symbols, not DGML IDs. Breakdowns overlap accounted streams.\n",
+                        display::exact(report.accounted_size_bytes)
                     );
                     for section in &report.sections {
-                        writeln!(&mut output, "\n{}{}: matched {} / {} B across {} identities\nBytes        Records  Identity",
+                        writeln!(&mut output, "\n{}{}: matched {} / {} across {} identities\nSize          % total    % stream   Records  Identity",
                             section.name, if section.accounted { "" } else { " [overlapping breakdown]" },
-                            section.matched_bytes, section.total_bytes, section.matched_identities).unwrap();
+                            display::exact(section.matched_bytes), display::exact(section.total_bytes), section.matched_identities).unwrap();
+                        let displayed = section
+                            .entries
+                            .iter()
+                            .map(|entry| u128::from(entry.bytes))
+                            .sum::<u128>();
                         for entry in &section.entries {
                             writeln!(
                                 &mut output,
-                                "{:<12} {:<8} {}",
-                                entry.bytes, entry.records, entry.identity
+                                "{:<13} {:>9} {:>10} {:<8} {}{}",
+                                display::bytes(entry.bytes),
+                                if section.accounted {
+                                    display::percent(entry.bytes, Some(report.accounted_size_bytes))
+                                } else {
+                                    "Overlap".into()
+                                },
+                                display::percent(entry.bytes, Some(section.total_bytes)),
+                                entry.records,
+                                display::text(&entry.identity),
+                                if entry.truncated {
+                                    " [display shortened]"
+                                } else {
+                                    ""
+                                }
                             )
                             .unwrap();
                         }
+                        writeln!(&mut output, "Shown: {displayed} B / {} matched bytes; this is a bounded top list, not a complete inventory.", section.matched_bytes).unwrap();
                     }
                     Ok(output)
                 }
@@ -684,44 +704,57 @@ fn render_mstat_summary(format: FormatArg, summary: &MstatSummary) -> Result<Str
         }
         FormatArg::Table => {
             let mut output = format!(
-                "MSTAT {}.{}: {}\nAccounted size: {} B\nInput: {} B\nMangled names: {} B\nTracked memory peak: {} B\n",
+                "MSTAT {}.{}: {}\nAccounted size: {}\nInput (MSTAT file, not executable): {}\nMangled names: {}\nTracked memory peak: {}\n",
                 summary.format_version.major,
                 summary.format_version.minor,
-                summary.assembly,
-                summary.accounted_size_bytes,
-                summary.input_bytes,
-                summary.mangled_names_bytes,
-                summary.peak_tracked_memory_bytes,
+                display::text(&summary.assembly),
+                display::exact(summary.accounted_size_bytes),
+                display::exact(summary.input_bytes),
+                display::exact(summary.mangled_names_bytes),
+                display::exact(summary.peak_tracked_memory_bytes),
             );
             output
-                .push_str("\nStreams\nRecords      Items        Size (B)     Encoded (B)  Name\n");
+                .push_str("\nStreams\nRecords      Items        Size          % total    Encoded       Role          Name\n");
             for category in &summary.categories {
                 writeln!(
                     &mut output,
-                    "{:<12} {:<12} {:<12} {:<12} {}",
+                    "{:<12} {:<12} {:<13} {:>9} {:<13} {:<13} {}",
                     category.records,
                     category.items,
-                    category.aggregate_size_bytes,
-                    category.encoded_bytes,
+                    display::bytes(category.aggregate_size_bytes),
+                    if matches!(category.name.as_str(), "Methods" | "Types" | "Blobs") {
+                        display::percent(
+                            category.aggregate_size_bytes,
+                            Some(summary.accounted_size_bytes),
+                        )
+                    } else {
+                        "Overlap".into()
+                    },
+                    display::bytes(category.encoded_bytes),
+                    if matches!(category.name.as_str(), "Methods" | "Types" | "Blobs") {
+                        "Additive"
+                    } else {
+                        "Overlapping"
+                    },
                     category.name,
                 )
                 .expect("writing to String cannot fail");
             }
             writeln!(
                 &mut output,
-                "\nMethods: bodies {} B, GC info {} B, EH info {} B",
-                summary.methods.body_bytes,
-                summary.methods.gc_info_bytes,
-                summary.methods.exception_info_bytes,
+                "\nMethods: bodies {}, GC info {}, EH info {}",
+                display::exact(summary.methods.body_bytes),
+                display::exact(summary.methods.gc_info_bytes),
+                display::exact(summary.methods.exception_info_bytes),
             )
             .expect("writing to String cannot fail");
             writeln!(
                 &mut output,
-                "Frozen objects: owned {} / {} B, unowned {} / {} B",
+                "Frozen objects (overlaps Blobs): owned {} / {}, unowned {} / {}",
                 summary.frozen_objects.owned_records,
-                summary.frozen_objects.owned_bytes,
+                display::exact(summary.frozen_objects.owned_bytes),
                 summary.frozen_objects.unowned_records,
-                summary.frozen_objects.unowned_bytes,
+                display::exact(summary.frozen_objects.unowned_bytes),
             )
             .expect("writing to String cannot fail");
             writeln!(
@@ -772,23 +805,23 @@ fn render_mstat_diff(format: FormatArg, report: &MstatDiff) -> Result<String, Ap
         }
         FormatArg::Table => {
             let mut output = format!(
-                "MSTAT accounted delta: {:+} B\n{} -> {}\nTracked memory peak: {} B\n",
-                report.total_delta_bytes,
-                report.before_assembly,
-                report.after_assembly,
-                report.peak_tracked_memory_bytes,
+                "MSTAT accounted delta: {}\n{} -> {}\nTracked memory peak: {}\n",
+                display::signed(report.total_delta_bytes),
+                display::text(&report.before_assembly),
+                display::text(&report.after_assembly),
+                display::exact(report.peak_tracked_memory_bytes),
             );
             for section in &report.sections {
                 writeln!(
                     &mut output,
-                    "\n{}{}: {:+} B ({} added, {} removed, {} changed)",
+                    "\n{}{}: {} ({} added, {} removed, {} changed)",
                     section.name,
                     if section.accounted {
                         ""
                     } else {
                         " [breakdown]"
                     },
-                    section.delta_bytes,
+                    display::signed(section.delta_bytes),
                     section.added,
                     section.removed,
                     section.changed,
@@ -797,11 +830,11 @@ fn render_mstat_diff(format: FormatArg, report: &MstatDiff) -> Result<String, Ap
                 for entry in &section.entries {
                     writeln!(
                         &mut output,
-                        "{:+12} B  {} -> {} records  {}",
-                        entry.delta_bytes,
+                        "{}  {} -> {} records  {}",
+                        display::signed(entry.delta_bytes),
                         entry.before_records,
                         entry.after_records,
-                        entry.identity,
+                        display::text(&entry.identity),
                     )
                     .expect("writing to String cannot fail");
                 }
@@ -1220,13 +1253,13 @@ fn render_dgml_index(format: FormatArg, report: &DgmlIndexReport) -> Result<Stri
         FormatArg::Json => serde_json::to_string_pretty(report).map_err(AppError::Json),
         FormatArg::Ndjson => serde_json::to_string(report).map_err(AppError::Json),
         FormatArg::Table => Ok(format!(
-            "DGML index: {}\nGeneration: {}\nNodes: {}\nEdges: {}\nIndex size: {} B\nTracked memory peak: {} B\nUnresolved endpoints: {}\n",
+            "DGML index: {}\nGeneration: {}\nNodes: {}\nEdges: {}\nIndex size: {}\nTracked memory peak: {}\nUnresolved endpoints: {}\n",
             report.index_directory.display(),
             report.generation,
             report.manifest.node_count,
             report.manifest.edge_count,
-            report.index_bytes,
-            report.peak_tracked_memory_bytes,
+            display::exact(report.index_bytes),
+            display::exact(report.peak_tracked_memory_bytes),
             report.manifest.unresolved_endpoints,
         )),
     }
@@ -1267,12 +1300,12 @@ fn render_cache_info(format: FormatArg, value: &DgmlCacheInfo) -> Result<String,
         FormatArg::Json => serde_json::to_string_pretty(value).map_err(AppError::Json),
         FormatArg::Ndjson => serde_json::to_string(value).map_err(AppError::Json),
         FormatArg::Table => Ok(format!(
-            "DGML cache: {}\nGeneration: {}\nNodes: {}\nEdges: {}\nSize: {} B\n",
+            "DGML cache: {}\nGeneration: {}\nNodes: {}\nEdges: {}\nSize: {}\n",
             value.index_directory.display(),
             value.generation,
             value.manifest.node_count,
             value.manifest.edge_count,
-            value.index_bytes,
+            display::exact(value.index_bytes),
         )),
     }
 }
@@ -1285,11 +1318,11 @@ fn render_cache_verification(
         FormatArg::Json => serde_json::to_string_pretty(value).map_err(AppError::Json),
         FormatArg::Ndjson => serde_json::to_string(value).map_err(AppError::Json),
         FormatArg::Table => Ok(format!(
-            "DGML cache verified: {}\nGeneration: {}\nFiles: {}\nSize: {} B\n",
+            "DGML cache verified: {}\nGeneration: {}\nFiles: {}\nSize: {}\n",
             value.index_directory.display(),
             value.generation,
             value.files_verified,
-            value.index_bytes,
+            display::exact(value.index_bytes),
         )),
     }
 }
@@ -1304,7 +1337,7 @@ fn render_cache_prune(format: FormatArg, value: &DgmlCachePruneReport) -> Result
             value.current_generation,
             value.generations_removed,
             value.temporary_directories_removed,
-            value.bytes_removed,
+            display::exact(value.bytes_removed),
         )),
     }
 }
@@ -1346,13 +1379,13 @@ fn render_dgml_stats(format: FormatArg, stats: &DgmlStats) -> Result<String, App
         }
         FormatArg::Table => {
             let mut output = format!(
-                "DGML: {} nodes, {} edges\nInput: {} B\nDuplicate node IDs: {}\nUnresolved endpoints: {}\nTracked memory peak: {} B\n",
+                "DGML: {} nodes, {} edges\nInput: {}\nDuplicate node IDs: {}\nUnresolved endpoints: {}\nTracked memory peak: {}\n",
                 stats.node_count,
                 stats.edge_count,
-                stats.input_bytes,
+                display::exact(stats.input_bytes),
                 stats.duplicate_node_ids,
                 stats.unresolved_endpoints,
-                stats.peak_tracked_memory_bytes,
+                display::exact(stats.peak_tracked_memory_bytes),
             );
             output.push_str("\nLargest fan-in\nEdges        Node ID\n");
             for entry in &stats.largest_fan_in {
@@ -1586,8 +1619,8 @@ fn render_comparison(
         }
         FormatArg::Table => {
             let mut output = format!(
-                "Metadata lower-bound delta: {:+} B\n",
-                report.summary.delta_bytes
+                "Metadata lower-bound delta: {}\n",
+                display::signed(report.summary.delta_bytes)
             );
             for (section, comparison) in comparison_sections(report, arguments) {
                 writeln!(&mut output, "\n{}", heading(section))
@@ -1595,8 +1628,11 @@ fn render_comparison(
                 for entry in comparison.entries.iter().take(arguments.top) {
                     writeln!(
                         &mut output,
-                        "{:+} B  {} B -> {} B  {}",
-                        entry.delta_bytes, entry.before_bytes, entry.after_bytes, entry.name
+                        "{}  {} -> {}  {}",
+                        display::signed(entry.delta_bytes),
+                        display::exact(entry.before_bytes),
+                        display::exact(entry.after_bytes),
+                        display::text(&entry.name)
                     )
                     .expect("writing to String cannot fail");
                 }
@@ -1646,14 +1682,16 @@ fn ndjson_line<T: Serialize>(schema: &str, section: &str, value: &T) -> Result<S
 
 fn render_table(report: &MetadataEnvelope, arguments: &MetadataArgs) -> String {
     let mut output = format!(
-        "Metadata lower bound: {} B across {} records\n",
-        report.summary.metadata_lower_bound_bytes, report.summary.observed_record_count
+        "Metadata lower bound: {} across {} records\n",
+        display::exact(report.summary.metadata_lower_bound_bytes),
+        report.summary.observed_record_count
     );
     if report.summary.selected_lower_bound_bytes != report.summary.metadata_lower_bound_bytes {
         writeln!(
             &mut output,
-            "Selected lower bound: {} B across {} records",
-            report.summary.selected_lower_bound_bytes, report.summary.record_count
+            "Selected lower bound: {} across {} records",
+            display::exact(report.summary.selected_lower_bound_bytes),
+            report.summary.record_count
         )
         .expect("writing to String cannot fail");
     }
@@ -1662,14 +1700,17 @@ fn render_table(report: &MetadataEnvelope, arguments: &MetadataArgs) -> String {
         vitnet_metadata::LimitStatus::OverByAtLeast { bytes, limit, .. } => {
             writeln!(
                 &mut output,
-                "NativeAOT limit:      {limit} B\nStatus:               OVER by at least {bytes} B"
+                "NativeAOT limit:      {}\nStatus:               OVER by at least {}",
+                display::exact(limit),
+                display::exact(bytes)
             )
             .expect("writing to String cannot fail");
         }
         vitnet_metadata::LimitStatus::AtOrBelowHeadroomUnknown { limit, .. } => {
             writeln!(
                 &mut output,
-                "NativeAOT limit:      {limit} B\nStatus:               at or below limit; remaining headroom unknown"
+                "NativeAOT limit:      {}\nStatus:               at or below limit; remaining headroom unknown",
+                display::exact(limit)
             )
             .expect("writing to String cannot fail");
         }
@@ -1679,24 +1720,29 @@ fn render_table(report: &MetadataEnvelope, arguments: &MetadataArgs) -> String {
         if let Some(coverage) = report.sections.concentration.get(section) {
             writeln!(
                 &mut output,
-                "Top coverage: {} / {} B across {} / {} groups; omitted {} B",
-                coverage.reported_bytes,
-                coverage.total_bytes,
+                "Top coverage: {} / {} ({}) across {} / {} groups; omitted {}",
+                display::exact(coverage.reported_bytes),
+                display::exact(coverage.total_bytes),
+                display::percent(coverage.reported_bytes, Some(coverage.total_bytes)),
                 coverage.reported_groups,
                 coverage.total_groups,
-                coverage.omitted_bytes
+                display::exact(coverage.omitted_bytes)
             )
             .unwrap();
         }
     }
     if arguments.strings {
-        output.push_str("\nLargest strings\nBytes        Offset       Value\n");
+        output.push_str("\nLargest strings\nSize          % selected Offset       Value\n");
         for entry in &report.sections.largest_strings {
             let ellipsis = if entry.preview.truncated { "..." } else { "" };
             writeln!(
                 &mut output,
-                "{:<12} {:<12} {}{}",
-                entry.bytes, entry.logical_offset, entry.preview.text, ellipsis
+                "{:<13} {:>9} {:<12} {}{}",
+                display::bytes(entry.bytes),
+                display::percent(entry.bytes, Some(report.summary.selected_lower_bound_bytes)),
+                entry.logical_offset,
+                display::text(&entry.preview.text),
+                ellipsis
             )
             .expect("writing to String cannot fail");
         }
@@ -1716,23 +1762,21 @@ fn render_aggregate_section(
     entries: &[Aggregate],
     report: &MetadataEnvelope,
 ) {
-    writeln!(output, "\n{title}\nBytes        Percent  Records  Name")
-        .expect("writing to String cannot fail");
+    writeln!(
+        output,
+        "\n{title}\nSize          % total    % selected Records  Name"
+    )
+    .expect("writing to String cannot fail");
     let denominator = report.summary.selected_lower_bound_bytes;
     for entry in entries {
-        let percentage_tenths = if denominator == 0 {
-            0
-        } else {
-            u128::from(entry.bytes) * 1_000 / u128::from(denominator)
-        };
         writeln!(
             output,
-            "{:<12} {:>5}.{}%  {:<7}  {}",
-            entry.bytes,
-            percentage_tenths / 10,
-            percentage_tenths % 10,
+            "{:<13} {:>9} {:>10} {:<7}  {}",
+            display::bytes(entry.bytes),
+            display::percent(entry.bytes, Some(report.summary.metadata_lower_bound_bytes)),
+            display::percent(entry.bytes, Some(denominator)),
             entry.records,
-            entry.name
+            display::text(&entry.name)
         )
         .expect("writing to String cannot fail");
     }

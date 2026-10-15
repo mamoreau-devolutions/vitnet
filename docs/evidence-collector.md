@@ -78,8 +78,9 @@ private collection. `smoke.ps1` builds only the synthetic fixtures it creates.
 | Binlog | Official StructuredLogger record reader; project-start/evaluation revision, SDK/toolchain/configuration properties; Csc output/source/reference/analyzer routes; local input identities read from metadata | Properties must have been recorded. Missing revision/Csc inputs and incomplete commands are diagnosed. A listed analyzer is not proof it executed. Framing, CRC, truncation and unsupported records fail. |
 | Assets | Resolved `project.assets.json` versions 3 and 4; each TFM/RID target's package `id/version`, direct declarations, resolved dependency `id/version` keys, compile/runtime assembly-path routes | Cycles, missing dependencies/direct targets, absent direct declarations and project-type libraries are explicit. Directness is not guessed from graph indegree. Library IDs use NuGet case-insensitive resolution. Multiple assets files retain per-file provenance; identical target names are not proof of identical projects. |
 | Managed PE | Assembly identity (version/culture/public-key token), MVID, full nested/generic metadata type names, enum/value/reference kind and method+field+property+event counts | Metadata counts include accessor methods; they are not source/member occurrence counts. Supplied netmodules/non-managed assemblies fail. |
-| Source | Roslyn type, enum, delegate, method, constructor, operator, property/indexer, event, field and enum-member declarations; type/method partial markers; textual attributes; physical file lines; actual file SHA-256 | ``Namespace.Outer`1+Inner`1`` metadata-style names preserve per-type arity. No semantic project compilation. Compiler defines/language options are used when recorded. Otherwise default Roslyn parsing is not evidence for inactive conditional branches. A literal csproj AssemblyName/nearest directory is only a hint; imports, conditions, globs and linked files are not evaluated. |
-| Generated source | Same declarations/hashes; explicit provenance below; conventional compiler output directory emitter candidates; analyzer assembly versions when uniquely routed | Directory names are candidates, not verified emitter ownership. Version, assembly and input symbols remain unknown when unavailable. Ordinary source-root scanning does not prove a `.g.cs` file's emitter. |
+| Source | Roslyn type, enum, delegate, method, constructor, operator, property/indexer, event, field and enum-member declarations; type/method partial markers; textual attributes and target-qualified annotations; physical file lines; actual file SHA-256 | ``Namespace.Outer`1+Inner`1`` metadata-style names preserve per-type arity. No semantic project compilation. Compiler defines/language options are used when recorded. Otherwise default Roslyn parsing is not evidence for inactive conditional branches. A literal csproj AssemblyName/nearest directory is only a hint; imports, conditions, globs and linked files are not evaluated. |
+| XAML source | Streamed `.xaml`/`.axaml` document syntax under an explicit `--source-root`: physical path/SHA-256, namespace-qualified root, root `x:Class`, `x:Key` strings and include `Source` URIs | No XAML compilation or application execution. Assembly is a recorded compiler route or nearest textual project-directory hint, never ownership/source-build equality. No XML DTD, external entity resolution, include fetching or URI resolution. XML syntax is not retention or byte attribution. |
+| Generated source | Actual local output-file SHA-256 in `generator_runs`; explicit provenance below; conventional compiler output directory emitter candidates; analyzer assembly versions when uniquely routed; supplied/candidate output-to-trigger links | Directory names are candidates, not verified emitter ownership or execution. Version, assembly and input symbols remain unknown when unavailable. Ordinary source-root scanning does not prove a `.g.cs` file's emitter. |
 | Portable PDB | Adjacent/local CodeView PDB or embedded portable PDB; identity matching; document path/algorithm/checksum facts; nonhidden sequence-point source records; associated metadata type/member names | Standalone/mismatched PDB type/member/assembly are unknown. SHA-1/SHA-256 checksums are compared with available files; `pdb.document_drift` records mismatches without discarding the compiled snapshot. Native/MSF PDB signatures yield `pdb.native_unsupported`, **not** portable-PDB fallback success. Custom debug/source records are not used as ownership. |
 | Resources | Embedded managed manifest containers and hashes; public Avalonia binary-index-v2 asset sizes/hashes; default .resources-v2 reader raw serialized entries and type labels | Container and child bytes overlap: never sum both. `.resources` entries include their serialized representation, not equivalent decoded cross-format content. No custom reader/application objects are instantiated. External resources are unknown. Corrupt supported formats fail; legacy/future versions/custom readers have explicit unsupported diagnostics and only container evidence. |
 | Native PE | PE32/PE32+ file bytes, architecture, each section's physical `SizeOfRawData` and `VirtualSize` | Physical file size includes headers/alignment/overlay/certificates and is not the section sum. COFF objects, ELF, Mach-O and malformed PE inputs fail; unknown machine codes are labelled. |
@@ -107,6 +108,63 @@ Attributes alone do not establish compiler roots or annotation-to-generator
 causation. `evidence.root_annotations_unknown` is always explicit for inferred
 roots. Verified compiler witnesses belong to the Rust graph layer.
 
+### Target-qualified source annotations
+
+`Source.annotations` is optional and absent for unannotated declarations and
+legacy/PDB-only records. Each item contains `target` and `attributes` (actual
+Roslyn attribute syntax strings, not inferred attribute types):
+
+* `declaration`: declaration attribute lists, except explicitly return-targeted lists;
+* `return`: explicit `[return: ...]` lists;
+* `parameter:<name>`: immediate parameter attribute lists with no explicit
+  target or with `param`, including primary-constructor/record parameters;
+* `generic_parameter:<name>`: immediate type/method/delegate type-parameter lists.
+
+Supported declaration owners retain their original path/type/member/line
+identity. Nested type/method parameters belong only to that nested declaration;
+no fake parameter or type-parameter source owner is emitted. Attribute class
+definitions are not attribute applications. A primary parameter's
+`[property: ...]` / `[field: ...]` lists are not mislabeled as parameter attributes.
+Names use identifier value text (so `@value` becomes `parameter:value`).
+Annotation targets are ordinally sorted; each target's strings preserve syntax
+order and duplicates. Existing `Source.attributes` is unchanged: it still
+flattens only the original declaration lists, including explicit return lists,
+and excludes parameter/type-parameter lists. Neither field proves semantic
+attribute binding, compiler roots, generator causation or retained bytes.
+Annotation groups and strings consume the shared record budget.
+
+### XAML document capture
+
+The nonnull top-level `xaml_documents` array contains records with
+`path`, `assembly`, optional `declared_class`, `root_element`, `sha256`,
+`includes` and `keys`. An omitted `--source-root` produces an empty array.
+The root element uses the expanded XML name `{namespace-uri}local-name`
+(or just `local-name` without a namespace), independent of prefix spelling.
+`Class`/`Key` are recognized only in the standard 2006/2009 XAML namespace;
+`declared_class` is read only on the root. Key/include strings are distinct and
+ordinally sorted, and documents are sorted by physical path.
+
+Include strings are unqualified `Source` attributes on `ResourceDictionary`,
+`ResourceInclude`, `StyleInclude`, `MergeResourceInclude` or `MergeStyleInclude`
+elements. Relative, `avares:`, `file:` and external URI spellings remain literal:
+the collector never follows them. These are syntax candidates, not a complete
+inventory of dynamically constructed resources or property-element expressions.
+Every document is a `source` artifact. `source.xaml_basis` and per-document
+`source.xaml_assembly_basis:<path>` provenance distinguish syntax-only
+associations; ambiguous/missing assembly routes are explicitly diagnosed.
+The nearest recorded compiler project directory can supply a hint, but does
+not override a nearer textual project directory. It does not establish that
+the document was compiled, executed or equals a build's source snapshot.
+
+XML is read incrementally with DTD processing prohibited and `XmlResolver = null`.
+Physical file/total/file-count budgets apply; XML character count is capped by
+`--max-file-bytes`, XML nesting is capped at depth 64, and visited nodes,
+attributes and captured items consume `--max-records`. Hashing uses the bounded
+source-byte helper; no full XML DOM is constructed. Malformed XML/DTD yields
+`source.xaml_malformed` (exit 2), excessive nesting
+`resource.collector.xaml_depth` (exit 4), and existing file/record limit codes
+remain unchanged. All failures preserve the previously published output.
+
 ### Optional supplied generator provenance
 
 Put a `vitnet.generator.json` inside a `--generated-root` subtree:
@@ -122,11 +180,74 @@ Put a `vitnet.generator.json` inside a `--generated-root` subtree:
 ```
 
 It describes `.cs` files under its directory; the nearest manifest wins.
-`assembly_path` is optional and resolved relative to the manifest.
+`assembly_path` is optional and resolved relative to the manifest. `version`
+may also be omitted when unknown; the legacy `generators.version` then remains
+an empty string and the new run's nullable version is absent.
 `input_symbols` is optional; absent means unknown, not an inferred empty root
 set. Present symbols are explicitly **supplied**, not independently validated.
 Without a manifest, `<AnalyzerAssembly>\<GeneratorType>\file.cs` establishes only
 a convention-based emitter candidate. SHA-256 always covers actual source bytes.
+
+### Output capture and trigger evidence
+
+The optional, additive top-level arrays `generator_runs` and `generator_links`
+retain the existing `generators` and `sources.generated_by` fields unchanged.
+Old hand-authored evidence and `vitnet.generator.v1` manifests still work.
+The collector reads an explicit `--generated-root` and also existing generated
+directories recorded by Csc's `/generatedfilesout`, task parameters or the
+associated evaluation's `CompilerGeneratedFilesOutputPath`. It never creates
+outputs by running a target build or generator. Missing directories, absent
+versions and ambiguous analyzer/project routes are diagnosed, not filled in
+from a source attribute or filename guess.
+
+`GeneratorRun` records `name`, nullable `version`, `assembly_path`,
+`project_path`, `target_assembly`, `target_assembly_path`, `configuration`,
+`target_framework`, plus `status`, `basis`, `execution_status`, and `outputs`.
+Statuses are separate:
+
+* `analyzer_referenced` / `binlog_csc_analyzer_input`: a compiler input DLL,
+  not necessarily a generator. It does not imply captured output.
+* `output_captured`: actual bytes were read. Ownership basis is
+  `supplied_manifest`, `conventional_output_directory`, or `emitter_unknown`.
+  An unknown emitter has an empty `name`, not an invented identity.
+* `output_unavailable`: a supplied manifest has no captured output.
+* `execution_status` is always **`not_observed`**. Neither a stale `.g.cs`
+  directory, a portable-PDB match, nor supplied assertions prove execution.
+  This collector has no independently verified generator-execution trace.
+
+Project/build fields come from a unique recorded compiler route owning the
+physical source/output directory. Matching portable-PDB evidence may establish
+an otherwise unknown target assembly, but never a project/configuration.
+Multiple routes leave the ambiguous build context absent. An analyzer's
+metadata identity (not a misleading DLL filename) must match the conventional
+directory assembly name. Multiple matching paths leave the version/path absent.
+
+Each output has `path`, `sha256`, `build_match` and `pdb_checksums`. A checksum
+records `pdb_path`, `algorithm`, `checksum`, `status`, `assembly_match`, and
+nullable `target_assembly` / `target_assembly_path`. SHA-1 and SHA-256 document
+checksums are compared to the captured file. Checksum status is `matched`,
+`drift`, `unavailable` or `unsupported`; assembly match is
+`pe_identity_verified`, `pe_identity_mismatch` or `unverified` (standalone PDB).
+`build_match` is `matched` or `drift` only with a verified PE/PDB identity and
+an applicable target. Different target paths are treated as copies only after
+comparing their actual PE SHA-256, not their names or MVID alone. Multiple
+builds/conflicting checksum results are `ambiguous`; absent/unverified evidence
+is `unknown`. A matching checksum validates bytes, **not** generator causation.
+
+`GeneratorLink` records `generator`, `output_path`, nullable `trigger_source`,
+`trigger_type`, `trigger_member`, `trigger_symbol`, and `rule`, `evidence_tier`,
+`basis`. The only emitted tiers/rules are:
+
+| Tier | Rule | Interpretation |
+| --- | --- | --- |
+| `supplied` | `manifest_input_symbol` | One output-to-symbol assertion per supplied input. It does not invent a resolved source/type/member or independently confirm the assertion. |
+| `candidate` | `attributed_partial_declaration` | Matching textual partial type/member declarations in captured output and attributed collected input. Attributes are retained in the basis; no name-based attribute-to-emitter lookup is performed. |
+| `candidate` | `line_directive` | An active ordinary `#line` literal has a unique collected physical source route, resolved relative to the output/project. Type/member locations are syntax candidates, not semantic identities or execution observations. |
+
+No links are fabricated when input declarations/symbols are unavailable.
+Unmatched/ambiguous `#line` paths are diagnosed. Enhanced span directives,
+semantic bindings, generator driver telemetry, embedded-source extraction and
+generator execution are not collected.
 
 ## Budgets
 
@@ -136,7 +257,7 @@ output. Apply smaller budgets before reading untrusted or unusually large input.
 
 | Option | Default | Enforcement |
 | --- | ---: | --- |
-| `--max-file-bytes` | 134,217,728 (128 MiB) | Each distinct opened input; also textual project/Git output bound |
+| `--max-file-bytes` | 134,217,728 (128 MiB) | Each distinct opened input; also textual project/XAML characters/Git output bound |
 | `--max-total-bytes` | 1,073,741,824 (1 GiB) | Sum of distinct available input file lengths |
 | `--max-files` | 10,000 | Distinct available files and visited directory entries (directories included) |
 | `--max-records` | 1,000,000 | Emitted records, facts/diagnostics and decoded/visited syntax, binlog, metadata and dependency records |
@@ -144,7 +265,7 @@ output. Apply smaller budgets before reading untrusted or unusually large input.
 | `--max-resource-bytes` | 67,108,864 (64 MiB) | Each managed container/individual resource payload |
 | `--max-output-bytes` | 268,435,456 (256 MiB) | Streamed evidence JSON before replacement |
 
-JSON depth is limited to 64. Git provenance commands have a 30-second bound.
+JSON and XAML XML depth are limited to 64. Git provenance commands have a 30-second bound.
 Directory scanning omits `.git`, `.svn`, `bin`, `obj`, `node_modules`, `.smoke`
 children; point `--generated-root` directly at the desired generated subtree.
 Reparse points/symbolic links are not followed.
@@ -158,6 +279,7 @@ decoding support.
 ```powershell
 pwsh -NoProfile -File tools\vitnet-evidence\smoke.ps1
 pwsh -NoProfile -File tools\vitnet-evidence\regression.ps1
+pwsh -NoProfile -File tools\vitnet-evidence\regression.ps1 -SourceOnly
 pwsh -NoProfile -File tools\vitnet-evidence\check-policy.ps1
 ```
 
@@ -165,9 +287,28 @@ This runs a synthetic source/partial/generic-type/assembly/generated-provenance/
 manifest/.resources/Avalonia-resource/portable-PDB/native-PE/assets/binlog smoke.
 The native PE is the SDK's synthetic fixture apphost; the fixture entry point
 throws if executed, and is never executed. This is not a generated unit-test
-suite. Fixture data is created only under ignored collector-owned `.smoke` and
-removed on exit (`-Keep` preserves it for inspection). A prior `.smoke` directory
+suite. Smoke fixture data is created under ignored collector-owned `.smoke`;
+regression fixtures use ignored, compilation-excluded
+`vitnet-evidence-regression-<guid>` directories. Both scripts accept
+`-ScratchRoot <existing-directory>` to put fixtures in a session artifact area.
+Fixtures are removed on exit (`-Keep` preserves them for inspection).
+A prior `.smoke` directory
 causes a refusal rather than deleting unrelated data.
+
+Generator regression groups pin existing legacy fields/manifests, supplied
+triggers, conventional output capture without supplied inputs, unknown
+version/output, recorded project/configuration, checksum matching and drift,
+multiple analyzer/build-route ambiguity, candidate attribute/`#line` links and
+the absence of fabricated execution.
+
+`-SourceOnly` runs focused synthetic source-annotation/XAML regressions,
+building only the collector: declaration/return/parameter/generic targets,
+nested and primary-constructor parameters, legacy attributes, no fake parameter
+owners, classes/keys/includes/hashes, namespace discrimination, syntax-only and
+ambiguous textual project hints, deterministic output, exact byte/file/record
+boundaries, prohibited DTD, malformed XML and depth rejection with atomic output
+preservation. The full regression also checks recorded compiler project-directory
+XAML hint provenance using its synthetic binlog fixture.
 
 Validation also exercised actual collector sources, managed assembly,
 portable PDB and restored package assets. Repeatable malformed-input, resource

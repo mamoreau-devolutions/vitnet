@@ -6,7 +6,22 @@ To connect those bytes to dependency routes, source/generator declarations,
 embedded assets and controlled native-build changes, see the
 [build and source attribution workflow](docs/attribution.md).
 For navigable budget diagrams, contributor/source inspection and bounded
-retention graphs, use the [visual explorer](docs/explorer.md):
+retention graphs, use the [visual explorer](docs/explorer.md).
+
+For nonobvious dependency, generated-code and repeated-pattern investigations,
+use [evidence-backed opportunities](docs/opportunities.md). New imports preserve
+typed NativeAOT tokens/signatures; new bundles expose ranked findings,
+cross-stream assembly/package budgets, generator-output/trigger capture and
+source-annotated retention. Unknown ownership and overlapping cohorts remain
+explicit; findings are not predicted savings.
+
+The **Investigate** tab adds connected feature footprints, XAML owner/helper
+drilldowns, serializer roots/options and repetition, generic argument heat maps,
+expansion costs, representative retention roots, applied reflection annotation
+targets, and metadata string composition/ownership. Source capture can retain
+XAML structure and parameter/return/generic-parameter annotations; older
+captures keep those gaps visible. Native costs and overlapping projections
+remain distinct, and product requirements remain your decision.
 
 ```powershell
 vitnet --memory-limit 2GiB explore prepare .\build-index --bundle .\explorer-bundle
@@ -15,7 +30,58 @@ vitnet explore export .\explorer-bundle --html .\size-report.html
 ```
 
 The portable report works offline. Live browsing queries small indexed slices;
-neither mode loads the whole dependency graph into the browser.
+neither mode loads the whole dependency graph into the browser. **All data**
+in the live report exposes every captured inventory and stored graph record
+through authenticated local APIs, with nested-field and full-text pagination.
+New bundles retain complete datasets independently of the bounded charts;
+legacy bundles must be prepared again to recover discarded inventory rows.
+New prepared reports also provide complete byte-ranked contributor/family
+drilldowns, accounted-total and parent-scope proportions, recorded package
+origins, a producer-grounded compiler-bucket glossary, and cancellable automatic
+search continuation. The size ledger keeps physical evidence and overlapping
+resource/metadata projections separate; missing measurements stay unknown.
+
+The same prepared data is available **directly in the terminal**, without
+starting a web server:
+
+```powershell
+vitnet explore summary .\explorer-bundle
+vitnet explore contributors .\explorer-bundle --stream Methods --limit 25
+vitnet explore datasets .\explorer-bundle
+vitnet explore records .\explorer-bundle resources --filter assembly=Product.Core
+vitnet explore origins .\explorer-bundle --assembly Product.Core
+vitnet explore inspect .\explorer-bundle 123 --view source
+vitnet explore inspect .\explorer-bundle 123 --view shape
+vitnet explore inspect .\explorer-bundle 123 --view symbol
+vitnet explore opportunities .\explorer-bundle
+vitnet explore budgets .\explorer-bundle --dimension package
+vitnet explore lenses .\explorer-bundle serializers
+vitnet explore lenses .\explorer-bundle arguments
+vitnet explore footprint .\explorer-bundle --assembly Product.Core --namespace Product.Models
+vitnet explore cohort-retention .\explorer-bundle --ordinal 12,35 --graph codegen_index
+vitnet explore retention .\explorer-bundle 456 --graph scan_index
+vitnet explore explain .\explorer-bundle 123
+vitnet explore guide .\explorer-bundle
+vitnet explore coverage .\explorer-bundle
+vitnet explore compare .\before-bundle .\after-bundle
+vitnet explore glossary Metadata
+vitnet explore contributors .\explorer-bundle --accounted-only --min-bytes 1MB --columns 'ordinal,size,identity'
+vitnet explore datasets .\explorer-bundle --storage bundle --nonempty --contains resource
+```
+
+Terminal tables use decimal human sizes, total/parent proportions and explicit
+overlap/unknown labels. Contributor and inventory searches automatically
+continue bounded scan batches, keep just one page, and print generation-pinned
+continuation commands. Inspection pages complete captured values rather than
+silently cutting off long identities, arrays or source candidates. The existing
+analyzer JSON/NDJSON schemas still expose exact raw bytes; new terminal explorer
+queries use `vitnet.explorer-cli.v1`. See the
+[terminal investigation workflow](docs/explorer.md#terminal-investigation).
+Connected explanations combine bounded source/shape evidence and full-inspection
+commands; comparisons keep missing measurements distinct from zero. Ranking
+supports inclusive byte ranges and exact identity matching, while optional
+columns simplify tables without changing captured records. The ten-improvement
+design is versioned in [the CLI plan](docs/cli-investigation-plan.md).
 
 `vitnet` is a clean-room, MIT-licensed Rust command-line tool for explaining
 size bloat in NativeAOT artifacts. It provides bounded-memory analyzers for
@@ -282,7 +348,8 @@ execution or a savings estimate. See
 Useful global controls include:
 
 - `--memory-limit 256MiB` bounds retained analysis state and the largest
-  logical CSV/XML record.
+  logical CSV/XML record. Integer sizes accept bytes, decimal KB through EB
+  and binary KiB through EiB; 1 MB is 1,000,000 bytes, not 1 MiB.
 - `--temp-dir <path>` selects the DGML cache root when `--cache-dir` is absent;
   otherwise indexes default to `.vitnet-cache` beside the input. Metadata
   analysis still has no disk spill.

@@ -10,7 +10,7 @@ use std::path::Path;
 use std::time::{Duration, Instant};
 mod incoming;
 mod why;
-pub use incoming::{BatchReport, IncomingEdge, IncomingOptions, IncomingReport};
+pub use incoming::{BatchReport, EdgePage, IncomingEdge, IncomingOptions, IncomingReport};
 pub use why::{WhyOptions, WhyReport};
 
 const QUERY_BUFFER: usize = 64 * 1024;
@@ -296,9 +296,63 @@ impl GraphSession {
         query: &str,
         options: &SearchOptions,
     ) -> Result<SearchReport, DgmlError> {
+        self.search_impl(query, options, false)
+    }
+
+    /// Enumerates every stored node, including empty labels, with bounded keyset pages.
+    ///
+    /// # Errors
+    ///
+    /// Rejects invalid generation, cursors and resource options.
+    pub fn browse_nodes(&mut self, options: &SearchOptions) -> Result<SearchReport, DgmlError> {
+        self.search_nodes("", options)
+    }
+
+    /// Searches node labels, allowing an empty filter to include every stored node.
+    ///
+    /// # Errors
+    ///
+    /// Rejects invalid generation, cursors and resource options.
+    pub fn search_nodes(
+        &mut self,
+        query: &str,
+        options: &SearchOptions,
+    ) -> Result<SearchReport, DgmlError> {
+        if options.mode != SearchMode::Contains
+            || options.rank != SearchRank::Id
+            || options.count_all
+        {
+            return Err(malformed_simple(
+                "dgml.query.options",
+                "node browsing needs contains mode and ID order",
+            ));
+        }
+        self.search_impl(query, options, true)
+    }
+
+    /// Returns all fields of one stored node; presentation paging belongs to the caller.
+    ///
+    /// # Errors
+    ///
+    /// Rejects absent nodes, cancellation and corrupt records.
+    pub fn node_record(&mut self, id: u64) -> Result<QueryNode, DgmlError> {
+        if self.control.is_cancelled() {
+            return Err(resource_error("resource.cancelled", "node query cancelled"));
+        }
+        self.node(id, 1024 * 1024)?
+            .ok_or_else(|| malformed_simple("dgml.query.node", "node ID is absent from this graph"))
+    }
+
+    #[allow(clippy::too_many_lines)]
+    fn search_impl(
+        &mut self,
+        query: &str,
+        options: &SearchOptions,
+        browse: bool,
+    ) -> Result<SearchReport, DgmlError> {
         self.check_generation(options.generation.as_deref())?;
         check_projection(options.limit, options.preview_bytes, self.memory_limit)?;
-        if query.is_empty()
+        if (query.is_empty() && !browse)
             || query.len() as u64 > TEXT_LIMIT
             || options.max_scanned == 0
             || options.timeout_ms == 0
@@ -306,6 +360,16 @@ impl GraphSession {
             return Err(malformed_simple(
                 "dgml.query.options",
                 "query and work limits must be nonempty/positive",
+            ));
+        }
+        if browse
+            && options
+                .after_id
+                .is_some_and(|id| self.manifest.max_node_id.is_none_or(|max| id > max))
+        {
+            return Err(malformed_simple(
+                "dgml.query.cursor",
+                "node cursor outside this graph",
             ));
         }
         let started = Instant::now();

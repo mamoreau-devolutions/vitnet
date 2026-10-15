@@ -17,7 +17,7 @@ use sysinfo::{Pid, System};
 
 mod query;
 pub use query::{
-    BatchReport, GraphSession, IncomingEdge, IncomingOptions, IncomingReport, SearchMode,
+    BatchReport, EdgePage, GraphSession, IncomingEdge, IncomingOptions, IncomingReport, SearchMode,
     SearchOptions, SearchRank, SearchReport, WhyOptions, WhyReport,
 };
 

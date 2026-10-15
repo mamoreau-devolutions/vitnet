@@ -25,6 +25,12 @@ jobs:
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           node --check (Join-Path $PWD 'crates\vitnet-cli\src\explorer\assets\layout.js')
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          node --check (Join-Path $PWD 'crates\vitnet-cli\src\explorer\assets\investigation.js')
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          node --test (Join-Path $PWD 'crates\vitnet-cli\tests\explorer-format.test.cjs')
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          node --test (Join-Path $PWD 'crates\vitnet-cli\tests\explorer-investigation.test.cjs')
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
       - run: cargo check --manifest-path fuzz/Cargo.toml --bins
 
   policy:

@@ -1,0 +1,65 @@
+{
+  "DehydratedData": {
+    "title": "Dehydrated runtime data",
+    "description": "Encoded data used to reconstruct runtime structures, including pointer relocations and zero runs.",
+    "investigation": "Compare physical binary sections with logical hydration-target accounting. This summary node is not an ordinary graph contributor; an exact bucket-label search may not identify its constituents. Disabling dehydration is not a saving recommendation.",
+    "source": "https://github.com/dotnet/runtime/blob/2eb7113245f7c536ab876dca5e3533fb96c81bbf/src/coreclr/tools/aot/ILCompiler.Compiler/Compiler/DependencyAnalysis/DehydratedDataNode.cs",
+    "view": "Evidence"
+  },
+  "ResourceData": {
+    "title": "Embedded resource payloads",
+    "description": "A concatenation of embedded resources from compilation input assemblies.",
+    "investigation": "Inspect the resource inventory by assembly and container. Decoded child assets and input DLL containers may overlap or differ from published resource payloads.",
+    "source": "https://github.com/dotnet/runtime/blob/2eb7113245f7c536ab876dca5e3533fb96c81bbf/src/coreclr/tools/aot/ILCompiler.Compiler/Compiler/DependencyAnalysis/ResourceDataNode.cs",
+    "view": "Resources"
+  },
+  "Metadata": {
+    "title": "Native reflection metadata",
+    "description": "Encoded NativeAOT metadata for retained types, methods, fields, signatures and constants.",
+    "investigation": "Open metadata kinds, types and strings. The metadata log supplies record starts and a lower bound, not exclusive source ownership.",
+    "source": "https://github.com/dotnet/runtime/blob/2eb7113245f7c536ab876dca5e3533fb96c81bbf/src/coreclr/tools/aot/ILCompiler.Compiler/Compiler/MetadataManager.cs",
+    "view": "Evidence"
+  },
+  "TypeGenericDictionary": {
+    "title": "Generic dictionary",
+    "description": "Runtime lookup slots for a concrete generic type or method, used by shared canonical code.",
+    "investigation": "Inspect generic families and their concrete producer arguments. Dictionary layout and slot demand also matter; identity counts alone do not measure either.",
+    "source": "https://github.com/dotnet/runtime/blob/2eb7113245f7c536ab876dca5e3533fb96c81bbf/src/coreclr/tools/aot/ILCompiler.Compiler/Compiler/DependencyAnalysis/GenericDictionaryNode.cs",
+    "view": "Amplification"
+  },
+  "MethodGenericDictionary": {
+    "title": "Generic dictionary",
+    "description": "Runtime lookup slots for a concrete generic type or method, used by shared canonical code.",
+    "investigation": "Inspect generic families and their concrete producer arguments. Dictionary layout and slot demand also matter; identity counts alone do not measure either.",
+    "source": "https://github.com/dotnet/runtime/blob/2eb7113245f7c536ab876dca5e3533fb96c81bbf/src/coreclr/tools/aot/ILCompiler.Compiler/Compiler/DependencyAnalysis/GenericDictionaryNode.cs",
+    "view": "Amplification"
+  },
+  "ArrayOfFrozenObjects": {
+    "title": "Preinitialized frozen objects",
+    "description": "A compiler-produced segment containing preinitialized managed object data.",
+    "investigation": "Inspect the non-additive FrozenObjects projection for concrete objects. It overlaps Blobs and can be a hydration target; do not add it to this bucket.",
+    "source": "https://github.com/dotnet/runtime/blob/2eb7113245f7c536ab876dca5e3533fb96c81bbf/src/coreclr/tools/aot/ILCompiler.Compiler/Compiler/DependencyAnalysis/ArrayOfFrozenObjectsNode.cs",
+    "view": "Contributors"
+  },
+  "ReflectionInvokeMap": {
+    "title": "Reflection-to-method map",
+    "description": "Mappings from reflection metadata to generated method bodies.",
+    "investigation": "Investigate reflectable methods and reflection-invoke edges. Broad reflection requirements are a possible size driver, not a proven cause for this build.",
+    "source": "https://github.com/dotnet/runtime/blob/2eb7113245f7c536ab876dca5e3533fb96c81bbf/src/coreclr/tools/aot/ILCompiler.Compiler/Compiler/DependencyAnalysis/ReflectionInvokeMapNode.cs",
+    "view": "Retention"
+  },
+  "ExternalReferencesTable": {
+    "title": "Runtime symbol references",
+    "description": "Indexed references to compiler symbols used by runtime tables.",
+    "investigation": "Inspect consuming metadata and reflection/generic tables. A reference count is neither bytes nor unique ownership.",
+    "source": "https://github.com/dotnet/runtime/blob/2eb7113245f7c536ab876dca5e3533fb96c81bbf/src/coreclr/tools/aot/ILCompiler.Compiler/Compiler/DependencyAnalysis/ExternalReferencesTableNode.cs",
+    "view": "Retention"
+  },
+  "GenericMethodsHashtable": {
+    "title": "Compiled generic-method lookup",
+    "description": "A runtime hashtable describing compiled generic method instantiations.",
+    "investigation": "Inspect generic method families and their arguments. This summary records compiled entries; it does not itself prove why each entry was retained.",
+    "source": "https://github.com/dotnet/runtime/blob/2eb7113245f7c536ab876dca5e3533fb96c81bbf/src/coreclr/tools/aot/ILCompiler.Compiler/Compiler/DependencyAnalysis/GenericMethodsHashtableNode.cs",
+    "view": "Amplification"
+  }
+}

@@ -1145,7 +1145,7 @@ fn http_why_enforces_depth_visit_and_edge_budgets_without_timing_assertions() {
 
 #[test]
 fn changed_graph_generation_is_rejected_even_when_bundle_index_hash_is_consistent() {
-    let fixture = Fixture::new(&[], Some(&graph_xml()));
+    let mut fixture = Fixture::new(&[], Some(&graph_xml()));
     let mut imported = vitnet_attribution::open_index(&fixture.index, MEMORY).unwrap();
     imported
         .artifacts
@@ -1159,6 +1159,19 @@ fn changed_graph_generation_is_rejected_even_when_bundle_index_hash_is_consisten
     manifest.index_blake3 = vitnet_attribution::hash_file(&fixture.index.join("index.json"))
         .unwrap()
         .1;
+    let snapshot_path = fixture.bundle.join("snapshot.json");
+    let mut snapshot: Value = serde_json::from_slice(&fs::read(&snapshot_path).unwrap()).unwrap();
+    snapshot["generation"] = Value::Null;
+    let mut fingerprint = blake3::Hasher::new();
+    fingerprint.update(b"vitnet.explorer-generation.v1\0");
+    fingerprint.update(manifest.index_blake3.as_bytes());
+    fingerprint.update(manifest.identities_blake3.as_bytes());
+    fingerprint.update(&serde_json::to_vec(&snapshot).unwrap());
+    manifest.generation = fingerprint.finalize().to_hex().to_string();
+    fixture.generation.clone_from(&manifest.generation);
+    snapshot["generation"] = json!(manifest.generation);
+    write_json(&snapshot_path, &snapshot);
+    manifest.snapshot_blake3 = vitnet_attribution::hash_file(&snapshot_path).unwrap().1;
     write_json(&fixture.bundle.join("bundle.json"), &manifest);
     let mut server = Server::start(&fixture);
     server

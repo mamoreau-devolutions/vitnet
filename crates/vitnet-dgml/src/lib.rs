@@ -4,9 +4,9 @@ mod index;
 
 pub use index::{
     BatchReport, DgmlCacheInfo, DgmlCachePruneReport, DgmlCacheVerification, DgmlIndexManifest,
-    DgmlIndexReport, GraphSession, IncomingEdge, IncomingOptions, IncomingReport, IndexControl,
-    IndexFeatures, IndexOptions, SearchMode, SearchOptions, SearchRank, SearchReport, WhyOptions,
-    WhyReport, build_index, cache_info, prune_cache, verify_cache,
+    DgmlIndexReport, EdgePage, GraphSession, IncomingEdge, IncomingOptions, IncomingReport,
+    IndexControl, IndexFeatures, IndexOptions, SearchMode, SearchOptions, SearchRank, SearchReport,
+    WhyOptions, WhyReport, build_index, cache_info, prune_cache, verify_cache,
 };
 
 use quick_xml::XmlVersion;

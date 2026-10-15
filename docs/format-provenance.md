@@ -16,6 +16,27 @@ No application assemblies are loaded or generators executed during collection.
 Source declarations are syntax evidence; name-derived ownership is a labelled
 candidate, not a demangled compiler contract.
 
+## Explorer compiler-bucket glossary
+
+The terminal and browser explorers share `assets/buckets.json`, so recognized
+bucket explanations and producer references cannot drift between views.
+The short glossary uses original descriptions derived from Microsoft
+NativeAOT producer definitions at exact commit
+`2eb7113245f7c536ab876dca5e3533fb96c81bbf`. It is not a demangler, source-owner
+mapping, graph join or saving estimate. Unknown producer spellings are not
+classified by analogy.
+
+| Bucket | Producer-grounded interpretation |
+| --- | --- |
+| [DehydratedData](https://github.com/dotnet/runtime/blob/2eb7113245f7c536ab876dca5e3533fb96c81bbf/src/coreclr/tools/aot/ILCompiler.Compiler/Compiler/DependencyAnalysis/DehydratedDataNode.cs) | Encoded runtime hydration data, including zero runs and relocations; its summary does not contribute ordinary graph dependencies. |
+| [ResourceData](https://github.com/dotnet/runtime/blob/2eb7113245f7c536ab876dca5e3533fb96c81bbf/src/coreclr/tools/aot/ILCompiler.Compiler/Compiler/DependencyAnalysis/ResourceDataNode.cs) | Concatenated embedded resources from compilation input assemblies. |
+| [Metadata](https://github.com/dotnet/runtime/blob/2eb7113245f7c536ab876dca5e3533fb96c81bbf/src/coreclr/tools/aot/ILCompiler.Compiler/Compiler/MetadataManager.cs) | Encoded retained NativeAOT reflection metadata; metadata-log sizes remain lower bounds. |
+| [TypeGenericDictionary / MethodGenericDictionary](https://github.com/dotnet/runtime/blob/2eb7113245f7c536ab876dca5e3533fb96c81bbf/src/coreclr/tools/aot/ILCompiler.Compiler/Compiler/DependencyAnalysis/GenericDictionaryNode.cs) | Runtime artifact lookup slots for concrete generic contexts used by canonical code. |
+| [ArrayOfFrozenObjects](https://github.com/dotnet/runtime/blob/2eb7113245f7c536ab876dca5e3533fb96c81bbf/src/coreclr/tools/aot/ILCompiler.Compiler/Compiler/DependencyAnalysis/ArrayOfFrozenObjectsNode.cs) | Summary of the aligned preinitialized managed-object segment; specialized FrozenObjects records overlap the Blobs representation. |
+| [ReflectionInvokeMap](https://github.com/dotnet/runtime/blob/2eb7113245f7c536ab876dca5e3533fb96c81bbf/src/coreclr/tools/aot/ILCompiler.Compiler/Compiler/DependencyAnalysis/ReflectionInvokeMapNode.cs) | Reflection metadata mappings to generated method bodies, with invocation-related dependencies. |
+| [ExternalReferencesTable](https://github.com/dotnet/runtime/blob/2eb7113245f7c536ab876dca5e3533fb96c81bbf/src/coreclr/tools/aot/ILCompiler.Compiler/Compiler/DependencyAnalysis/ExternalReferencesTableNode.cs) | Indexed compiler-symbol references used by runtime tables. |
+| [GenericMethodsHashtable](https://github.com/dotnet/runtime/blob/2eb7113245f7c536ab876dca5e3533fb96c81bbf/src/coreclr/tools/aot/ILCompiler.Compiler/Compiler/DependencyAnalysis/GenericMethodsHashtableNode.cs) | Runtime table describing compiled generic method instantiations, not a proof of their retention cause. |
+
 ## NativeAOT metadata log (Phase 1)
 
 The current pinned baseline is
@@ -124,6 +145,14 @@ The MSTAT evidence baseline is
 MSTAT parsing is derived from these public producer contracts and ECMA-335 PE
 metadata rules. Local large-file validation does not contribute private names,
 tokens, or fixture bytes to the repository.
+
+The typed-symbol sidecar reuses the same pinned stream tokens and metadata
+emitter, interpreted using ECMA-335 owner tables and signature encodings. It
+preserves artifact-local tokens, full managed assembly identities, overload
+signatures and generic instantiations; it never equates those tokens with token
+numbers in the original managed assembly. Native identity/accounting formats
+remain unchanged. Source/build checksums are independent evidence, and unsupported
+module scopes/pointer-table ownership are reported rather than guessed.
 
 ### Logical object sizes versus physical file bytes
 

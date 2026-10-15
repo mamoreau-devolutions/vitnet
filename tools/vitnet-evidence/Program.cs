@@ -68,6 +68,12 @@ internal static class Program
                 stage = path;
                 SourceCollector.CollectGenerated(context, path);
             }
+            foreach (var path in context.GeneratorRoutes.Select(r => r.GeneratedDirectory).OfType<string>()
+                .Distinct(CollectionContext.PathComparer).Order(StringComparer.Ordinal))
+            {
+                stage = path;
+                SourceCollector.CollectGenerated(context, path);
+            }
             foreach (var path in options.Paths("assembly"))
             {
                 stage = path;
@@ -83,6 +89,7 @@ internal static class Program
                 stage = path;
                 PeCollector.Native(context, path);
             }
+            GeneratedCollector.Finish(context);
             context.Diagnostic("evidence.root_annotations_unknown", "Compiler root annotations are not inferred from names/attributes; use explicit graph witnesses or supplied generator input_symbols.");
             context.Diagnostic("evidence.revision_scope", "Revision/toolchain labels are recorded facts, not proof of a clean or matching checkout.");
             Sort(context.Evidence);
@@ -128,6 +135,12 @@ internal static class Program
         evidence.Assemblies.Sort((a, b) => Compare(a.Name, b.Name, a.Path, b.Path));
         evidence.Sources.Sort((a, b) => Compare(a.Path, b.Path, $"{a.Line:D12}:{a.TypeName}:{a.Member}:{a.Assembly}:{a.Kind}", $"{b.Line:D12}:{b.TypeName}:{b.Member}:{b.Assembly}:{b.Kind}"));
         evidence.Generators.Sort((a, b) => Compare(a.Name, b.Name, a.AssemblyPath, b.AssemblyPath));
+        evidence.GeneratorRuns.Sort((a, b) => Compare(a.Name, b.Name,
+            a.Basis + ":" + a.AssemblyPath + ":" + a.ProjectPath + ":" + a.TargetAssemblyPath + ":" + a.Configuration + ":" + a.TargetFramework + ":" + a.Status,
+            b.Basis + ":" + b.AssemblyPath + ":" + b.ProjectPath + ":" + b.TargetAssemblyPath + ":" + b.Configuration + ":" + b.TargetFramework + ":" + b.Status));
+        evidence.GeneratorLinks.Sort((a, b) => Compare(a.OutputPath, b.OutputPath,
+            a.Generator + ":" + a.Rule + ":" + a.TriggerSource + ":" + a.TriggerType + ":" + a.TriggerMember + ":" + a.TriggerSymbol + ":" + a.Basis,
+            b.Generator + ":" + b.Rule + ":" + b.TriggerSource + ":" + b.TriggerType + ":" + b.TriggerMember + ":" + b.TriggerSymbol + ":" + b.Basis));
         evidence.Resources.Sort((a, b) => Compare(a.Assembly, b.Assembly, a.Container + ":" + a.Name, b.Container + ":" + b.Name));
         evidence.Binaries.Sort((a, b) => StringComparer.Ordinal.Compare(a.Path, b.Path));
         evidence.Mappings.Sort((a, b) => Compare(a.Stream, b.Stream, a.Identity + ":" + a.Assembly + ":" + a.Basis, b.Identity + ":" + b.Assembly + ":" + b.Basis));

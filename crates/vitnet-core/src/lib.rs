@@ -73,9 +73,18 @@ impl FromStr for ByteSize {
             .map_err(|_| OptionError::InvalidByteSize(value.to_owned()))?;
         let multiplier = match suffix.to_ascii_lowercase().as_str() {
             "" | "b" => 1_u64,
+            "kb" => 1000,
+            "mb" => 1_000_000,
+            "gb" => 1_000_000_000,
+            "tb" => 1_000_000_000_000,
+            "pb" => 1_000_000_000_000_000,
+            "eb" => 1_000_000_000_000_000_000,
             "kib" => 1_u64 << 10,
             "mib" => 1_u64 << 20,
             "gib" => 1_u64 << 30,
+            "tib" => 1_u64 << 40,
+            "pib" => 1_u64 << 50,
+            "eib" => 1_u64 << 60,
             _ => return Err(OptionError::InvalidByteSize(value.to_owned())),
         };
         number
@@ -87,7 +96,7 @@ impl FromStr for ByteSize {
 
 #[derive(Clone, Debug, Error, Eq, PartialEq)]
 pub enum OptionError {
-    #[error("invalid byte size `{0}`; expected bytes, KiB, MiB, or GiB")]
+    #[error("invalid byte size `{0}`; expected an integer followed by B, KB..EB, or KiB..EiB")]
     InvalidByteSize(String),
     #[error("byte size `{0}` exceeds the supported u64 range")]
     ByteSizeOverflow(String),

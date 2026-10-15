@@ -30,6 +30,8 @@ pub struct AttributionIndex {
     pub identities: u64,
     pub identities_blake3: String,
     pub diagnostics: Vec<EvidenceDiagnostic>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub symbols: Option<crate::SymbolSidecar>,
 }
 
 /// Hashes a file with a fixed streaming buffer.
@@ -104,11 +106,52 @@ pub fn validate_evidence(evidence: &Evidence) -> Result<(), AttributionError> {
         return Err(error("attribution.schema", "unsupported evidence schema"));
     }
     if evidence.sources.iter().any(|source| {
-        source.line == 0 || source.end_line < source.line || source.type_name.is_empty()
+        source.line == 0
+            || source.end_line < source.line
+            || source.type_name.is_empty()
+            || source
+                .annotations
+                .as_ref()
+                .is_some_and(|items| items.iter().any(|item| item.target.is_empty()))
     }) {
         return Err(error(
             "attribution.source",
             "invalid source declaration or line range",
+        ));
+    }
+    if evidence.xaml_documents.iter().any(|document| {
+        document.path.as_os_str().is_empty()
+            || document.root_element.is_empty()
+            || document.sha256.len() != 64
+            || !document.sha256.bytes().all(|byte| byte.is_ascii_hexdigit())
+    }) {
+        return Err(error(
+            "attribution.xaml",
+            "XAML documents require a path, root element and SHA-256",
+        ));
+    }
+    if evidence.generator_runs.iter().any(|run| {
+        run.name.is_empty()
+            || run.basis.is_empty()
+            || run.status.is_empty()
+            || run.execution_status.is_empty()
+            || run.outputs.iter().any(|output| {
+                output.path.as_os_str().is_empty()
+                    || output.build_match.is_empty()
+                    || output.sha256.as_ref().is_some_and(|hash| {
+                        hash.len() != 64 || !hash.bytes().all(|b| b.is_ascii_hexdigit())
+                    })
+            })
+    }) || evidence.generator_links.iter().any(|link| {
+        link.generator.is_empty()
+            || link.output_path.as_os_str().is_empty()
+            || link.rule.is_empty()
+            || link.evidence_tier.is_empty()
+            || link.basis.is_empty()
+    }) {
+        return Err(error(
+            "attribution.generator",
+            "invalid generated-output capture or trigger assertion",
         ));
     }
     if evidence.mappings.iter().any(|mapping| {
@@ -172,12 +215,42 @@ pub fn import(
     for source in &mut evidence.sources {
         resolve(&mut source.path);
     }
+    for document in &mut evidence.xaml_documents {
+        resolve(&mut document.path);
+    }
     for assembly in &mut evidence.assemblies {
         resolve(&mut assembly.path);
     }
     for generator in &mut evidence.generators {
         resolve(&mut generator.assembly_path);
         for path in &mut generator.generated_files {
+            resolve(path);
+        }
+    }
+    for run in &mut evidence.generator_runs {
+        for path in [
+            &mut run.assembly_path,
+            &mut run.project_path,
+            &mut run.target_assembly_path,
+        ]
+        .into_iter()
+        .flatten()
+        {
+            resolve(path);
+        }
+        for output in &mut run.outputs {
+            resolve(&mut output.path);
+            for checksum in &mut output.pdb_checksums {
+                resolve(&mut checksum.pdb_path);
+                if let Some(path) = &mut checksum.target_assembly_path {
+                    resolve(path);
+                }
+            }
+        }
+    }
+    for link in &mut evidence.generator_links {
+        resolve(&mut link.output_path);
+        if let Some(path) = &mut link.trigger_source {
             resolve(path);
         }
     }
@@ -205,6 +278,12 @@ pub fn import(
         .map(|source| ("source", &source.path))
         .chain(
             evidence
+                .xaml_documents
+                .iter()
+                .map(|document| ("source", &document.path)),
+        )
+        .chain(
+            evidence
                 .assemblies
                 .iter()
                 .map(|assembly| ("assembly", &assembly.path)),
@@ -214,7 +293,20 @@ pub fn import(
                 .binaries
                 .iter()
                 .map(|binary| ("binary", &binary.path)),
-        );
+        )
+        .chain(evidence.generator_runs.iter().flat_map(|run| {
+            run.outputs
+                .iter()
+                .map(|output| ("generator_output", &output.path))
+        }))
+        .chain(evidence.generator_runs.iter().flat_map(|run| {
+            run.outputs.iter().flat_map(|output| {
+                output
+                    .pdb_checksums
+                    .iter()
+                    .map(|checksum| ("pdb", &checksum.pdb_path))
+            })
+        }));
     for (kind, path) in additional {
         if known.insert((kind.to_owned(), path.clone())) {
             evidence.artifacts.push(crate::model::Artifact {
@@ -386,53 +478,71 @@ pub fn import(
             })
         })
         .transpose()?;
+    let mut symbols = None;
     let mstat = if let Some(path) = mstat_path {
-        Some(
-            vitnet_mstat::visit_coalesced_path(&path, memory_limit / 2, |entry| {
-                let row = serde_json::to_vec(&entry).map_err(|cause| vitnet_mstat::MstatError {
+        let summary = vitnet_mstat::visit_coalesced_path(&path, memory_limit / 2, |entry| {
+            let row = serde_json::to_vec(&entry).map_err(|cause| vitnet_mstat::MstatError {
+                diagnostic: Box::new(vitnet_core::Diagnostic::malformed(
+                    "attribution.io",
+                    cause.to_string(),
+                )),
+            })?;
+            if row.len() as u64 > (memory_limit / 64).min(32 * 1024 * 1024) - 1 {
+                return Err(vitnet_mstat::MstatError {
+                    diagnostic: Box::new(vitnet_core::Diagnostic::malformed(
+                        "resource.memory_limit",
+                        "serialized identity exceeds cache row budget",
+                    )),
+                });
+            }
+            writer
+                .write_all(&row)
+                .map_err(|cause| vitnet_mstat::MstatError {
                     diagnostic: Box::new(vitnet_core::Diagnostic::malformed(
                         "attribution.io",
                         cause.to_string(),
                     )),
                 })?;
-                if row.len() as u64 > (memory_limit / 64).min(32 * 1024 * 1024) - 1 {
-                    return Err(vitnet_mstat::MstatError {
-                        diagnostic: Box::new(vitnet_core::Diagnostic::malformed(
-                            "resource.memory_limit",
-                            "serialized identity exceeds cache row budget",
-                        )),
-                    });
-                }
-                writer
-                    .write_all(&row)
-                    .map_err(|cause| vitnet_mstat::MstatError {
-                        diagnostic: Box::new(vitnet_core::Diagnostic::malformed(
-                            "attribution.io",
-                            cause.to_string(),
-                        )),
-                    })?;
-                writer
-                    .write_all(b"\n")
-                    .map_err(|cause| vitnet_mstat::MstatError {
-                        diagnostic: Box::new(vitnet_core::Diagnostic::malformed(
-                            "attribution.io",
-                            cause.to_string(),
-                        )),
-                    })?;
-                count = count
-                    .checked_add(1)
-                    .ok_or_else(|| vitnet_mstat::MstatError {
-                        diagnostic: Box::new(vitnet_core::Diagnostic::malformed(
-                            "attribution.count",
-                            "identity count overflow",
-                        )),
-                    })?;
-                Ok(())
-            })
-            .map_err(|cause| AttributionError {
-                diagnostic: cause.diagnostic,
-            })?,
-        )
+            writer
+                .write_all(b"\n")
+                .map_err(|cause| vitnet_mstat::MstatError {
+                    diagnostic: Box::new(vitnet_core::Diagnostic::malformed(
+                        "attribution.io",
+                        cause.to_string(),
+                    )),
+                })?;
+            count = count
+                .checked_add(1)
+                .ok_or_else(|| vitnet_mstat::MstatError {
+                    diagnostic: Box::new(vitnet_core::Diagnostic::malformed(
+                        "attribution.count",
+                        "identity count overflow",
+                    )),
+                })?;
+            Ok(())
+        })
+        .map_err(|cause| AttributionError {
+            diagnostic: cause.diagnostic,
+        })?;
+        let mut symbol_writer =
+            crate::symbols::SymbolWriter::new(temporary.path(), memory_limit / 4)?;
+        vitnet_mstat::visit_symbols_path(&path, memory_limit / 2, |symbol| {
+            symbol_writer
+                .push(
+                    &symbol.stream,
+                    &symbol.raw_identity_blake3,
+                    symbol.token,
+                    &symbol,
+                )
+                .map_err(|cause| vitnet_mstat::MstatError {
+                    diagnostic: cause.diagnostic,
+                })
+        })
+        .map_err(|cause| AttributionError {
+            diagnostic: cause.diagnostic,
+        })?;
+        symbols = Some(symbol_writer.finish()?);
+        Some(summary)
     } else {
         None
     };
@@ -451,6 +561,7 @@ pub fn import(
         identities: count,
         identities_blake3: hash_file(&entries_path)?.1,
         diagnostics,
+        symbols,
     };
     let index_path = temporary.path().join("index.json");
     let mut index_writer =

@@ -2,6 +2,7 @@ use proptest::prelude::*;
 use vitnet_mstat::{diff, summarize, top_entries};
 
 mod insights_cases;
+mod symbols_cases;
 
 #[test]
 fn top_identities_coalesce_sizes_filter_exact_bytes_and_mark_overlapping_streams() {

@@ -15,7 +15,7 @@ Release measurements on the same Windows reference machine:
 
 | Operation / artifact | Result |
 | --- | ---: |
-| Complete bundle preparation, three supplemental inventories, two witnesses | 20.202 s |
+| Bounded-overview bundle preparation, three supplemental inventories, two witnesses | 20.202 s |
 | Preparation peak sampled working set | 632,426,496 B (603.1 MiB) |
 | Offset sidecar | 29,647,120 B |
 | Snapshot JSON | 787,208 B (0.75 MiB) |
@@ -59,6 +59,123 @@ string cursors `99999` and `199999` for continuation (6/5 ms). Slots include
 holes: these timings do not predict dense label-search cost. The replay also
 confirmed the 1,208 connected-element bound and shut down only its own explorer.
 The same warm-local and non-worst-case limitations apply to this replay.
+
+### Complete captured-data catalog
+
+The subsequent full-inventory bundle retains 62 NDJSON datasets plus live access
+to identities and both graphs' nodes/edges (67 dataset choices). This includes
+128,331 partitions, 28,495 generic families, 1,920 resources, 1,440 package
+routes, 182,713 source declarations, 7,683 provenance records and all captured
+metadata arrays. Supplemental categories remain independently accessible.
+
+| Operation / artifact | Result |
+| --- | ---: |
+| Full-catalog preparation, debug build, same inputs and supplements | 165.741 s |
+| Preparation peak sampled working set | 595,185,664 B (567.6 MiB) |
+| Complete bundle files, excluding original identities/graphs | 271,304,529 B |
+| Full inventory-record and original identity verification, release build | 26.240 s |
+| Verification peak sampled working set | 638,398,464 B (608.8 MiB) |
+| Release full-catalog server readiness, warm-local browser replay | 885 ms |
+| Largest connected document in ten complete-data browser cases | 1,286 elements |
+| Largest table / sampled browser JavaScript heap in that replay | 100 rows / 8,294,148 B |
+
+The release replay checked 141 bounded API responses, including the last record
+of every nonempty persisted dataset and full graph-edge details, plus ten
+desktop/mobile navigation cases. Thirteen synthetic mobile cases additionally
+checked 101-entry nested arrays, complete generator file lists, multi-page UTF-8
+text, previous-page/breadcrumb navigation, empty inventories and explicit error
+recovery. The existing 38-case live/offline replay also remained clean.
+
+Preparation and verification working sets were sampled at 100 ms. The preparation
+run used a debug build and is not comparable to the earlier release preparation
+time. These are uncontrolled warm-local diagnostics, not cold-cache, worst-case,
+cross-browser or browser-process peak guarantees. Original private inputs,
+generated inventories and browser artifacts are not repository fixtures.
+
+### Connected size investigation
+
+A release preparation from the same immutable indexes adds a complete
+largest-first ranking and sorted scope/origin catalogs. It retains 64 persisted
+datasets, identities and four graph inventories (69 dataset choices), without
+changing the original graph or identity files.
+
+| Operation / artifact | Result |
+| --- | ---: |
+| Ranked bundle preparation, two runs, same supplements and witnesses | 21.209 / 26.392 s |
+| Preparation peak sampled working set | 632,238,080 B |
+| Complete bundle files, excluding original identities/graphs | 365,601,802 B |
+| Complete ranking, 3,705,889 16-byte entries | 59,294,224 B |
+| Full catalog, identity and rank/original-row verification, two runs | 142.174 / 488.979 s |
+| Verification peak sampled working set | 643,772,416 B |
+| Warm-local server readiness, investigation replay | 991 ms |
+| First / next 100 largest contributors | 139 / 10 ms |
+| Sampled mobile document / JavaScript heap | 1,428 elements / 5,462,584 B |
+
+Full verification now compares every ranked byte count with its original
+identity using random file seeks. That explicit integrity check accounts for
+the additional verification cost; interactive pages read only bounded slices.
+The ranking uses bounded external sorting; package-origin keys additionally
+reserve at most one sixteenth of the preparation memory budget.
+
+The dedicated replay exercised nine corpus API operations and nine
+desktop/mobile investigation workflows, including family members, connected
+inventory navigation, three-batch automatic continuation, cancellation and
+stale-result isolation. The first ranked response was 32,314 B. A real generic
+family scan reached the cooperative timeout and kept its continuation; the
+frontend completed its bounded member page automatically.
+The final live/offline replay passed all 38 workflows, including cancellation
+and resumable automatic continuation, without page or console errors. Its
+largest sampled document had 1,469 elements and all tables stayed within 100 rows.
+The complete-catalog replay additionally checked 147 bounded API responses and
+ten desktop/mobile cases; thirteen synthetic cases verified nested-array,
+UTF-8 text, empty-inventory and error-recovery behavior. Mobile inventory tables
+scroll inside their own container rather than forcing narrow, unreadable columns.
+
+Working sets were sampled at 100 ms. These are uncontrolled local measurements,
+not controlled comparisons with previous runs, cold-cache or worst-case limits,
+browser-process memory peaks, or guarantees for all captured names and pages.
+Bounded pages and cooperative continuation do not turn graph-label scans into
+an indexed label lookup. The final preparation/verification ran alongside
+browser regression work; the large verification variation is not a controlled
+performance comparison. Full verification is explicitly expensive and is not
+performed for each live page.
+
+### Typed ownership and opportunity preparation
+
+A release replay of the same private corpus imported typed MSTAT symbol
+sidecars into a new index, then prepared complete opportunity catalogs without
+modifying the original indexes or running the target application:
+
+| Operation / artifact | Result |
+| --- | ---: |
+| Typed import wall time / peak sampled working set | 155.210 s / 1,325,178,880 B |
+| Opportunity preparation wall time / peak sampled working set | 67.758 s / 687,181,824 B |
+| Captured typed symbol records / serialized payload | 3,246,099 / 3,817,809,849 B |
+| Complete opportunity findings / budgets | 10,006 / 1,184 |
+| Methods with managed owner joins / total Methods | 365,125,016 / 365,125,094 B |
+| Types with managed owner joins / total Types | 196,421,460 / 196,431,644 B |
+
+Assembly and per-target package partitions reconciled every additive stream
+exactly; metadata and resource projections remained non-additive. Managed
+owner joins covered 99.99998% of Methods and 99.99482% of Types by reported
+bytes. This establishes artifact-local managed ownership, not source/build
+checksum agreement or exclusive responsibility for generic specialization.
+The Blob owner gap remains explicit. This older evidence captured no generator
+output runs or input links; name/attribute cohorts were not promoted to verified
+generator execution.
+
+These are uncontrolled warm-local Windows measurements, not comparative
+speedups, cold-cache guarantees, RSS limits or reclaimable-size estimates.
+The payload figures precede compact lookup deduplication of repeated identical
+tokens; verbose captured records remain unchanged by that deduplication.
+
+A final release replay with lookup deduplication completed import in 162.790 s
+at 1,349,971,968 B peak working set, and preparation in 70.135 s at
+677,875,712 B. All 1,184 budgets were byte-for-byte identical to the earlier
+preparation. Two private declarative feature/capability rules added two
+investigation candidates, bringing that bundle to 10,008 findings; neither
+claimed savings. This corpus happened to have no duplicate stream/name/token
+lookup entries, so its compact record count did not change.
 
 ## Bounded analysis dogfooding
 
@@ -369,3 +486,35 @@ cost. No RDM graph was ingested into Turso, no checkpoint/reopen/crash campaign
 was completed, and these timings are not directly comparable to the logical
 stream test above. The custom disk index remains the production backend.
 Synthetic results are not extrapolated into a large-corpus performance claim.
+# Connected investigation lenses
+
+The local private NativeAOT index used for the typed-opportunity replay was
+prepared into a new immutable bundle with the connected lenses enabled:
+**127.148 seconds**, peak sampled process working set **1,931,452,416 bytes**,
+exit 0, with `--memory-limit 2GiB`. Original compiler artifacts and source
+contents were not copied into the repository.
+
+The replay retained 207,000+ tiered owner groups, 5,906 XAML owner/helper groups,
+51 captured serializer contexts, 16 repeated literal roots, 116,993 producer
+arguments, 12 applied reflection-annotation records, and 524,288 upstream
+metadata-string records. The complete feature ledger reconciled
+1,062,414,426 additive bytes and 41,183,314 overlapping metadata lower-bound
+bytes, including assembly-only and unowned remainders. Specialized projections
+remained separate.
+
+Generic-family names are interned across argument projections instead of
+allocating a copy per association. Example accounting charges actual retained
+string bytes and vector capacity instead of reserving three maximum-sized
+examples for every singleton; the 100,001-argument synthetic regression
+continues to prepare within its configured 128 MiB accounting budget.
+Owner/argument aggregation fails explicitly on exhausted aggregate memory. Native identity
+streaming, catalog writing, source/name joins and graph queries retain their
+independent budgets; configured memory remains an accounting budget rather
+than a hard operating-system RSS guarantee.
+
+The old capture has no original XAML document records or generated output
+links. Selected ownership was not present in its metadata-string schema;
+new metadata analyses preserve that context. These gaps remain visible.
+Desktop (1600px) and narrow (390px) browser checks loaded bounded lens pages,
+measured a complete assembly scope, and inspected metadata records without
+runtime errors or document-level horizontal overflow.

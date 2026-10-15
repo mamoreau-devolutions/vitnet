@@ -13,5 +13,6 @@
     <PackageReference Include="Microsoft.CodeAnalysis.CSharp" Version="[5.0.0]" />
     <PackageReference Include="MSBuild.StructuredLogger" Version="[2.3.246]" />
     <Compile Remove=".smoke\**" />
+    <Compile Remove="vitnet-evidence-regression-*\**" />
   </ItemGroup>
 </Project>

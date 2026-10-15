@@ -36,8 +36,8 @@ fn byte_size_rejects_missing_values_unknown_units_and_overflow() {
         Err(OptionError::InvalidByteSize("MiB".into()))
     );
     assert_eq!(
-        ByteSize::from_str("1MB"),
-        Err(OptionError::InvalidByteSize("1MB".into()))
+        ByteSize::from_str("1XB"),
+        Err(OptionError::InvalidByteSize("1XB".into()))
     );
     assert!(matches!(
         ByteSize::from_str("18446744073709551615GiB"),

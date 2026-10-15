@@ -1,4 +1,4 @@
-use super::{PAGE_LIMIT, RESPONSE_LIMIT, attribution, data, diagnostic, io};
+use super::{PAGE_LIMIT, RESPONSE_LIMIT, attribution, catalog, data, diagnostic, io, ranking};
 use crate::AppError;
 use serde::Deserialize;
 use serde_json::{Value, json};
@@ -21,17 +21,143 @@ const CONNECTION_LIMIT: usize = 4;
 #[path = "server_tests.rs"]
 mod tests;
 
+#[path = "investigation.rs"]
+mod investigation;
+#[path = "lens_queries.rs"]
+mod lens_queries;
+
 #[derive(Debug, Deserialize)]
-struct QueryRequest {
-    request_id: String,
-    generation: String,
+pub(super) struct QueryRequest {
+    pub(super) request_id: String,
+    pub(super) generation: String,
     #[serde(flatten)]
-    query: Query,
+    pub(super) query: Query,
 }
 
 #[derive(Debug, Deserialize)]
 #[serde(tag = "action", rename_all = "snake_case", deny_unknown_fields)]
-enum Query {
+pub(super) enum Query {
+    FeatureFootprint {
+        assembly: Option<String>,
+        namespace: Option<String>,
+        owner: Option<String>,
+        project: Option<String>,
+        #[serde(default, deserialize_with = "optional_ordinal")]
+        after: Option<u64>,
+    },
+    CohortRetention {
+        graph: String,
+        #[serde(deserialize_with = "ordinals")]
+        ordinals: Vec<u64>,
+    },
+    LensDetail {
+        dataset: String,
+        #[serde(deserialize_with = "ordinal")]
+        ordinal: u64,
+    },
+    RankedRows {
+        #[serde(default)]
+        contains: String,
+        stream: Option<String>,
+        assembly: Option<String>,
+        owner: Option<String>,
+        family: Option<String>,
+        #[serde(default, deserialize_with = "optional_ordinal")]
+        family_record: Option<u64>,
+        #[serde(default)]
+        accounted_only: bool,
+        min_bytes: Option<u64>,
+        max_bytes: Option<u64>,
+        #[serde(default)]
+        exact: bool,
+        #[serde(default, deserialize_with = "optional_ordinal")]
+        after: Option<u64>,
+        #[serde(default = "default_page")]
+        limit: usize,
+    },
+    Related {
+        assembly: Option<String>,
+        package: Option<String>,
+        target: Option<String>,
+        #[serde(default, deserialize_with = "optional_ordinal")]
+        after: Option<u64>,
+        #[serde(default = "default_page")]
+        limit: usize,
+    },
+    IdentityShapeValue {
+        #[serde(deserialize_with = "ordinal")]
+        ordinal: u64,
+        #[serde(default)]
+        path: Vec<u64>,
+        #[serde(default)]
+        start: u64,
+        #[serde(default)]
+        key: bool,
+    },
+    Catalog {},
+    Records {
+        dataset: String,
+        #[serde(default)]
+        contains: String,
+        #[serde(default)]
+        filters: BTreeMap<String, String>,
+        #[serde(default, deserialize_with = "optional_ordinal")]
+        after: Option<u64>,
+        #[serde(default = "default_page")]
+        limit: usize,
+    },
+    RecordValue {
+        dataset: String,
+        #[serde(deserialize_with = "ordinal")]
+        ordinal: u64,
+        #[serde(default)]
+        path: Vec<u64>,
+        #[serde(default)]
+        start: u64,
+        #[serde(default)]
+        key: bool,
+    },
+    IdentityValue {
+        #[serde(deserialize_with = "ordinal")]
+        ordinal: u64,
+        #[serde(default)]
+        path: Vec<u64>,
+        #[serde(default)]
+        start: u64,
+        #[serde(default)]
+        key: bool,
+    },
+    SourceValue {
+        #[serde(deserialize_with = "ordinal")]
+        ordinal: u64,
+        #[serde(default)]
+        path: Vec<u64>,
+        #[serde(default)]
+        start: u64,
+        #[serde(default)]
+        key: bool,
+    },
+    SymbolValue {
+        ordinal: u64,
+        #[serde(default)]
+        path: Vec<u64>,
+        #[serde(default)]
+        start: u64,
+        #[serde(default)]
+        key: bool,
+    },
+    IncomingEdgeValue {
+        graph: String,
+        node_id: String,
+        #[serde(deserialize_with = "ordinal")]
+        ordinal: u64,
+        #[serde(default)]
+        path: Vec<u64>,
+        #[serde(default)]
+        start: u64,
+        #[serde(default)]
+        key: bool,
+    },
     Rows {
         #[serde(default)]
         contains: String,
@@ -50,6 +176,8 @@ enum Query {
         query: String,
         mode: SearchMode,
         after_id: Option<String>,
+        #[serde(default = "graph_page")]
+        limit: usize,
     },
     Incoming {
         graph: String,
@@ -60,14 +188,71 @@ enum Query {
         graph: String,
         node_id: String,
     },
+    AnnotatedWhy {
+        graph: String,
+        node_id: String,
+    },
 }
 
 fn default_page() -> usize {
     50
 }
 
+fn graph_page() -> usize {
+    50
+}
+
+fn unsigned_decimal(value: &str) -> Option<u64> {
+    if value.bytes().all(|byte| byte.is_ascii_digit()) {
+        value.parse().ok()
+    } else {
+        None
+    }
+}
+
+fn parse_ordinal(value: Value) -> Result<u64, String> {
+    match value {
+        Value::String(value) => {
+            unsigned_decimal(&value).ok_or_else(|| "expected an unsigned decimal ordinal".into())
+        }
+        Value::Number(value) => value
+            .as_u64()
+            .ok_or_else(|| "expected an unsigned ordinal".into()),
+        _ => Err("expected an unsigned ordinal or decimal string".into()),
+    }
+}
+
+fn ordinal<'de, D: serde::Deserializer<'de>>(input: D) -> Result<u64, D::Error> {
+    parse_ordinal(Value::deserialize(input)?).map_err(serde::de::Error::custom)
+}
+
+fn optional_ordinal<'de, D: serde::Deserializer<'de>>(input: D) -> Result<Option<u64>, D::Error> {
+    let value = Value::deserialize(input)?;
+    if value.is_null() {
+        Ok(None)
+    } else {
+        parse_ordinal(value)
+            .map(Some)
+            .map_err(serde::de::Error::custom)
+    }
+}
+
+fn ordinals<'de, D: serde::Deserializer<'de>>(input: D) -> Result<Vec<u64>, D::Error> {
+    Vec::<Value>::deserialize(input)?
+        .into_iter()
+        .map(|value| parse_ordinal(value).map_err(serde::de::Error::custom))
+        .collect()
+}
+
+fn graph_dataset(dataset: &str) -> Option<(&str, bool)> {
+    let name = dataset.strip_prefix("graph_")?;
+    name.strip_suffix("_nodes")
+        .map(|name| (name, false))
+        .or_else(|| name.strip_suffix("_edges").map(|name| (name, true)))
+}
+
 fn number(value: &str) -> Result<u64, AppError> {
-    value.parse().map_err(|_| {
+    unsigned_decimal(value).ok_or_else(|| {
         diagnostic(
             "explorer.cursor",
             "node and edge cursors must be unsigned decimal strings",
@@ -75,7 +260,7 @@ fn number(value: &str) -> Result<u64, AppError> {
     })
 }
 
-struct Backend<'a> {
+pub(super) struct Backend<'a> {
     bundle: &'a data::Bundle,
     index: &'a AttributionIndex,
     matcher: Matcher<'a>,
@@ -85,10 +270,13 @@ struct Backend<'a> {
     index_modified: SystemTime,
     memory: u64,
     graphs: BTreeMap<String, GraphSession>,
+    datasets: BTreeMap<String, catalog::Reader>,
+    ranking: Option<ranking::Reader>,
+    symbols: Option<vitnet_attribution::SymbolLookup>,
 }
 
 impl<'a> Backend<'a> {
-    fn new(
+    pub(super) fn new(
         bundle: &'a data::Bundle,
         index: &'a AttributionIndex,
         memory: u64,
@@ -112,10 +300,27 @@ impl<'a> Backend<'a> {
                 .map_err(io)?,
             memory,
             graphs: BTreeMap::new(),
+            datasets: BTreeMap::new(),
+            ranking: None,
+            symbols: index
+                .symbols
+                .as_ref()
+                .map(|descriptor| {
+                    vitnet_attribution::SymbolLookup::open(
+                        &bundle.manifest.attribution_index,
+                        descriptor,
+                        memory,
+                    )
+                })
+                .transpose()
+                .map_err(attribution)?,
         })
     }
 
     fn check_source(&self) -> Result<(), AppError> {
+        if let Some(symbols) = &self.symbols {
+            symbols.check().map_err(attribution)?;
+        }
         let identity = fs::metadata(
             self.bundle
                 .manifest
@@ -137,7 +342,19 @@ impl<'a> Backend<'a> {
         Ok(())
     }
 
-    fn row(&mut self, ordinal: u64) -> Result<vitnet_mstat::CoalescedIdentity, AppError> {
+    fn located(
+        &mut self,
+        entry: &vitnet_mstat::CoalescedIdentity,
+    ) -> Result<vitnet_attribution::SourceMatch, AppError> {
+        self.matcher
+            .locate_entry(entry, self.symbols.as_mut())
+            .map_err(attribution)
+    }
+
+    pub(super) fn row(
+        &mut self,
+        ordinal: u64,
+    ) -> Result<vitnet_mstat::CoalescedIdentity, AppError> {
         data::read_identity(
             &mut self.identities,
             &mut self.offsets,
@@ -146,6 +363,192 @@ impl<'a> Backend<'a> {
             self.bundle.manifest.identity_file_bytes,
             self.memory,
         )
+    }
+
+    fn dataset(&mut self, name: &str) -> Result<&mut catalog::Reader, AppError> {
+        if !self.datasets.contains_key(name) {
+            let descriptor = self.bundle.manifest.datasets.get(name).ok_or_else(|| {
+                diagnostic(
+                    "explorer.dataset",
+                    "dataset is not in this captured catalog; reprepare legacy bundles",
+                )
+            })?;
+            self.datasets.insert(
+                name.into(),
+                catalog::Reader::open(&self.bundle.directory, name, descriptor)?,
+            );
+        }
+        let reader = self
+            .datasets
+            .get_mut(name)
+            .ok_or_else(|| diagnostic("explorer.invariant", "dataset reader was not inserted"))?;
+        reader.check()?;
+        Ok(reader)
+    }
+
+    fn catalog(&self) -> Value {
+        let mut datasets: Vec<_> = self.bundle.manifest.datasets.iter().map(|(name, entry)| json!({
+            "name":name,"records":entry.records,"data_bytes":entry.data_bytes,"storage":"bundle",
+        })).collect();
+        datasets.insert(0, json!({"name":"identities","records":self.bundle.manifest.identities,"storage":"original_index"}));
+        if let Some(graphs) = self.bundle.snapshot["graphs"].as_array() {
+            for graph in graphs {
+                if let Some(kind) = graph["kind"].as_str() {
+                    datasets.push(json!({"name":format!("graph_{kind}_nodes"),"records":graph["node_count"],"storage":"immutable_graph"}));
+                    datasets.push(json!({"name":format!("graph_{kind}_edges"),"records":graph["edge_count"],"storage":"immutable_graph"}));
+                }
+            }
+        }
+        json!({"schema":"vitnet.explorer-catalog.v1","datasets":datasets,
+            "complete":!self.bundle.manifest.datasets.is_empty(),
+            "scope":"All captured records, not original source contents, discarded producer attributes, or every possible retention path.",
+            "comparison_scope":"Captured comparison report; compiler identity deltas retain the upstream comparison top-N limit.",
+            "sources_captured":self.index.evidence.sources.len(),
+            "generators_captured":self.index.evidence.generators.len(),
+            "ranking_available":self.bundle.manifest.ranking.is_some(),
+            "supplements":self.bundle.snapshot["coverage"]["supplemental_inventories"],
+        })
+    }
+
+    #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
+    fn records(
+        &mut self,
+        request: &QueryRequest,
+        dataset: &str,
+        contains: &str,
+        filters: &BTreeMap<String, String>,
+        after: Option<u64>,
+        limit: usize,
+        control: &IndexControl,
+    ) -> Result<Value, AppError> {
+        if limit == 0 || limit > PAGE_LIMIT || contains.len() > 1024 {
+            return Err(diagnostic(
+                "resource.explorer.query",
+                "dataset page exceeds browser budgets",
+            ));
+        }
+        if dataset == "identities" {
+            if filters
+                .keys()
+                .any(|key| !matches!(key.as_str(), "stream" | "assembly" | "owner"))
+            {
+                return Err(diagnostic("explorer.query", "unsupported identity filter"));
+            }
+            let mut result = self.query(
+                &QueryRequest {
+                    request_id: request.request_id.clone(),
+                    generation: request.generation.clone(),
+                    query: Query::Rows {
+                        contains: contains.into(),
+                        stream: filters.get("stream").cloned(),
+                        assembly: filters.get("assembly").cloned(),
+                        owner: filters.get("owner").cloned(),
+                        after,
+                        limit,
+                    },
+                },
+                control,
+            )?;
+            if let Some(entries) = result["entries"].as_array_mut() {
+                for entry in entries {
+                    *entry = json!({"ordinal":entry["ordinal"].to_string(),"summary":entry["identity"],
+                        "bytes":entry["bytes"],"stream":entry["stream"]});
+                }
+            }
+            result["next_after"] = result["next_after"]
+                .as_u64()
+                .map_or(Value::Null, |n| json!(n.to_string()));
+            result["total"] = json!(self.bundle.manifest.identities);
+            return Ok(result);
+        }
+        if let Some((kind, edges)) = graph_dataset(dataset) {
+            if !filters.is_empty() {
+                return Err(diagnostic(
+                    "explorer.query",
+                    "graph datasets use full text / ID search, not exact inventory-field filters",
+                ));
+            }
+            let node_count = self.bundle.snapshot["graphs"]
+                .as_array()
+                .and_then(|graphs| {
+                    graphs
+                        .iter()
+                        .find(|graph| graph["kind"].as_str() == Some(kind))
+                })
+                .map(|graph| graph["node_count"].clone())
+                .ok_or_else(|| {
+                    diagnostic(
+                        "explorer.graph.missing",
+                        "graph is not in the captured catalog",
+                    )
+                })?;
+            let graph = self.graph(kind, control)?;
+            if edges {
+                let page = graph
+                    .search_edges(
+                        contains,
+                        &IncomingOptions {
+                            limit,
+                            after_edge: after,
+                            timeout_ms: super::QUERY_TIMEOUT_MS,
+                            preview_bytes: 256,
+                            generation: Some(graph.generation.clone()),
+                        },
+                        super::MAX_SCANNED,
+                    )
+                    .map_err(AppError::Dgml)?;
+                return Ok(json!({"entries":page.entries.iter().map(|edge| json!({
+                    "ordinal":edge.ordinal.to_string(),"summary":format!("{} -> {}: {}",edge.source_id,edge.target_id,edge.reason)
+                })).collect::<Vec<_>>(),"total":page.total,"next_after":page.next_after_edge.map(|n| n.to_string()),
+                    "scanned":page.scanned,"stop_reason":page.stop_reason,"order":"global_csr_edge_ordinal"}));
+            }
+            let options = SearchOptions {
+                mode: SearchMode::Contains,
+                limit,
+                after_id: after,
+                max_scanned: super::MAX_SCANNED,
+                timeout_ms: super::QUERY_TIMEOUT_MS,
+                preview_bytes: 512,
+                generation: Some(graph.generation.clone()),
+                ..SearchOptions::default()
+            };
+            let page = graph
+                .search_nodes(contains, &options)
+                .map_err(AppError::Dgml)?;
+            return Ok(json!({"entries":page.entries.iter().map(|node| json!({
+                "ordinal":node.node_id.to_string(),"summary":node.label
+            })).collect::<Vec<_>>(),"next_after":page.next_after_id.map(|n| n.to_string()),
+                "total":node_count,"scanned":page.scanned_nodes,"stop_reason":page.stop_reason,"order":"node_id"}));
+        }
+        let memory = self.memory;
+        self.dataset(dataset)?
+            .page(contains, filters, after, limit, memory, control)
+    }
+
+    fn record_value(
+        &mut self,
+        dataset: &str,
+        ordinal: u64,
+        control: &IndexControl,
+    ) -> Result<Value, AppError> {
+        if control.is_cancelled() {
+            return Err(diagnostic("resource.cancelled", "record query cancelled"));
+        }
+        if dataset == "identities" {
+            return serde_json::to_value(self.row(ordinal)?).map_err(AppError::Json);
+        }
+        if let Some((kind, edges)) = graph_dataset(dataset) {
+            let graph = self.graph(kind, control)?;
+            return if edges {
+                serde_json::to_value(graph.edge_record(ordinal).map_err(AppError::Dgml)?)
+                    .map_err(AppError::Json)
+            } else {
+                serde_json::to_value(graph.node_record(ordinal).map_err(AppError::Dgml)?)
+                    .map_err(AppError::Json)
+            };
+        }
+        let memory = self.memory;
+        self.dataset(dataset)?.record(ordinal, memory)
     }
 
     fn graph(&mut self, kind: &str, control: &IndexControl) -> Result<&mut GraphSession, AppError> {
@@ -188,7 +591,11 @@ impl<'a> Backend<'a> {
     }
 
     #[allow(clippy::too_many_lines)]
-    fn query(&mut self, request: &QueryRequest, control: &IndexControl) -> Result<Value, AppError> {
+    pub(super) fn query(
+        &mut self,
+        request: &QueryRequest,
+        control: &IndexControl,
+    ) -> Result<Value, AppError> {
         self.check_source()?;
         if request.generation != self.bundle.manifest.generation {
             return Err(diagnostic(
@@ -197,6 +604,164 @@ impl<'a> Backend<'a> {
             ));
         }
         let mut value = match &request.query {
+            Query::LensDetail { dataset, ordinal } => {
+                if !dataset.starts_with("lens_") {
+                    return Err(diagnostic(
+                        "explorer.query",
+                        "lens detail requires an investigation dataset",
+                    ));
+                }
+                let memory = self.memory;
+                let value = self.dataset(dataset)?.record(*ordinal, memory)?;
+                if serde_json::to_vec(&value).map_err(AppError::Json)?.len() as u64
+                    > (memory / 16).min(RESPONSE_LIMIT as u64)
+                {
+                    return Err(diagnostic(
+                        "resource.explorer.response",
+                        "lens detail exceeds response budget; use paged record_value",
+                    ));
+                }
+                json!({"generation":self.bundle.manifest.generation,"record":value,"dataset":dataset,"ordinal":ordinal.to_string()})
+            }
+            Query::FeatureFootprint {
+                assembly,
+                namespace,
+                owner,
+                project,
+                after,
+            } => self.feature_footprint(
+                assembly.as_deref(),
+                namespace.as_deref(),
+                owner.as_deref(),
+                project.as_deref(),
+                *after,
+                control,
+            )?,
+            Query::CohortRetention { graph, ordinals } => {
+                self.cohort_retention(graph, ordinals, control)?
+            }
+            Query::RankedRows { .. } => self.ranked_rows(request, control)?,
+            Query::Related {
+                assembly,
+                package,
+                target,
+                after,
+                limit,
+            } => self.related(
+                assembly.as_deref(),
+                package.as_deref(),
+                target.as_deref(),
+                *after,
+                *limit,
+                control,
+            )?,
+            Query::IdentityShapeValue {
+                ordinal,
+                path,
+                start,
+                key,
+            } => {
+                if control.is_cancelled() {
+                    return Err(diagnostic(
+                        "resource.cancelled",
+                        "producer shape query cancelled",
+                    ));
+                }
+                let entry = self.row(*ordinal)?;
+                if entry.identity_lossy {
+                    return Err(diagnostic(
+                        "explorer.shape.lossy",
+                        "lossy producer identity cannot establish a shape",
+                    ));
+                }
+                let shape =
+                    vitnet_attribution::parse_shape(&entry.identity).map_err(attribution)?;
+                if control.is_cancelled() {
+                    return Err(diagnostic(
+                        "resource.cancelled",
+                        "producer shape query cancelled",
+                    ));
+                }
+                let value = serde_json::to_value(shape).map_err(AppError::Json)?;
+                catalog::value_page(&value, path, *start, *key)?
+            }
+            Query::Catalog {} => {
+                if control.is_cancelled() {
+                    return Err(diagnostic("resource.cancelled", "catalog query cancelled"));
+                }
+                self.catalog()
+            }
+            Query::Records {
+                dataset,
+                contains,
+                filters,
+                after,
+                limit,
+            } => self.records(request, dataset, contains, filters, *after, *limit, control)?,
+            Query::RecordValue {
+                dataset,
+                ordinal,
+                path,
+                start,
+                key,
+            } => {
+                let record = self.record_value(dataset, *ordinal, control)?;
+                catalog::value_page(&record, path, *start, *key)?
+            }
+            Query::IdentityValue {
+                ordinal,
+                path,
+                start,
+                key,
+            } => {
+                let record = self.record_value("identities", *ordinal, control)?;
+                catalog::value_page(&record, path, *start, *key)?
+            }
+            Query::SourceValue {
+                ordinal,
+                path,
+                start,
+                key,
+            } => {
+                if control.is_cancelled() {
+                    return Err(diagnostic("resource.cancelled", "source query cancelled"));
+                }
+                let entry = self.row(*ordinal)?;
+                let record = serde_json::to_value(self.located(&entry)?).map_err(AppError::Json)?;
+                catalog::value_page(&record, path, *start, *key)?
+            }
+            Query::SymbolValue {
+                ordinal,
+                path,
+                start,
+                key,
+            } => {
+                if control.is_cancelled() {
+                    return Err(diagnostic("resource.cancelled", "symbol query cancelled"));
+                }
+                let entry = self.row(*ordinal)?;
+                let symbols = self.symbols.as_mut().ok_or_else(|| diagnostic(
+                    "explorer.symbols.unavailable", "typed symbols were not captured; reimport the original MSTAT into a new index before preparing"))?;
+                let values = symbols
+                    .get(&entry.stream, &entry.raw_identity_blake3)
+                    .map_err(attribution)?;
+                catalog::value_page(&json!(values), path, *start, *key)?
+            }
+            Query::IncomingEdgeValue {
+                graph,
+                node_id,
+                ordinal,
+                path,
+                start,
+                key,
+            } => {
+                let edge = self
+                    .graph(graph, control)?
+                    .incoming_edge_record(number(node_id)?, *ordinal)
+                    .map_err(AppError::Dgml)?;
+                let record = serde_json::to_value(edge).map_err(AppError::Json)?;
+                catalog::value_page(&record, path, *start, *key)?
+            }
             Query::Rows {
                 contains,
                 stream,
@@ -258,11 +823,9 @@ impl<'a> Backend<'a> {
                     if stream.as_ref().is_none_or(|stream| entry.stream == *stream)
                         && entry.identity.contains(contains)
                         && owner_match
-                        && assembly.as_ref().is_none_or(|filter| {
-                            if entry.identity_lossy {
-                                return filter == "_unmapped";
-                            }
-                            let located = self.matcher.locate(&entry.stream, &entry.identity);
+                    {
+                        let assembly_match = if let Some(filter) = assembly {
+                            let located = self.located(&entry)?;
                             if located.assemblies.len() == 1 {
                                 located.assemblies[0] == *filter
                             } else if located.assemblies.is_empty() {
@@ -270,8 +833,12 @@ impl<'a> Backend<'a> {
                             } else {
                                 filter == "_ambiguous"
                             }
-                        })
-                    {
+                        } else {
+                            true
+                        };
+                        if !assembly_match {
+                            continue;
+                        }
                         entries.push(data::Row::new(&entry, ordinal));
                         if entries.len() == *limit {
                             if ordinal + 1 != self.bundle.manifest.identities {
@@ -292,15 +859,29 @@ impl<'a> Backend<'a> {
                     return Err(diagnostic("resource.cancelled", "source query cancelled"));
                 }
                 let entry = self.row(*ordinal)?;
-                data::details(&self.matcher, &entry, *ordinal)
+                let sources = self.located(&entry)?;
+                let mut result = data::details(&self.matcher, &entry, *ordinal, sources);
+                if let Some(symbols) = &mut self.symbols {
+                    result["symbol_candidate_count"] = json!(
+                        symbols
+                            .get(&entry.stream, &entry.raw_identity_blake3)
+                            .map_err(attribution)?
+                            .len()
+                    );
+                    result["symbol_scope"] = json!(
+                        "Open symbol_value for complete artifact-local token owners and signatures; source/build checksum trust remains independent."
+                    );
+                }
+                result
             }
             Query::GraphSearch {
                 graph,
                 query,
                 mode,
                 after_id,
+                limit,
             } => {
-                if query.is_empty() || query.len() > 1024 {
+                if query.is_empty() || query.len() > 1024 || *limit == 0 || *limit > 50 {
                     return Err(diagnostic(
                         "explorer.search",
                         "graph search needs 1..=1024 bytes",
@@ -309,7 +890,7 @@ impl<'a> Backend<'a> {
                 let session = self.graph(graph, control)?;
                 let options = SearchOptions {
                     mode: *mode,
-                    limit: 50,
+                    limit: *limit,
                     after_id: after_id.as_deref().map(number).transpose()?,
                     max_scanned: super::MAX_SCANNED,
                     timeout_ms: super::QUERY_TIMEOUT_MS,
@@ -350,8 +931,47 @@ impl<'a> Backend<'a> {
                 )
                 .map_err(AppError::Json)?
             }
+            Query::AnnotatedWhy { graph, node_id } => {
+                let session = self.graph(graph, control)?;
+                let options = data::why_options(&session.generation);
+                let witness = session
+                    .why(number(node_id)?, &options)
+                    .map_err(AppError::Dgml)?;
+                let incoming = session
+                    .incoming(
+                        number(node_id)?,
+                        &IncomingOptions {
+                            limit: 50,
+                            after_edge: None,
+                            timeout_ms: super::QUERY_TIMEOUT_MS,
+                            preview_bytes: 256,
+                            generation: Some(session.generation.clone()),
+                        },
+                    )
+                    .map_err(AppError::Dgml)?;
+                serde_json::to_value(vitnet_attribution::annotate_retention(
+                    &self.index.evidence,
+                    witness,
+                    incoming,
+                ))
+                .map_err(AppError::Json)?
+            }
         };
         stringify_ids(&mut value);
+        if matches!(
+            &request.query,
+            Query::Catalog {}
+                | Query::RankedRows { .. }
+                | Query::Related { .. }
+                | Query::IdentityShapeValue { .. }
+                | Query::Records { .. }
+                | Query::RecordValue { .. }
+                | Query::IdentityValue { .. }
+                | Query::SourceValue { .. }
+                | Query::IncomingEdgeValue { .. }
+        ) {
+            value["generation"] = json!(request.generation);
+        }
         Ok(value)
     }
 }
@@ -722,9 +1342,54 @@ fn handle(
                 .map_err(AppError::Json)?;
             response(stream, 200, "application/json", &bytes, nonce)
         }
-        "/api/query" => {
+        "/api/query"
+        | "/api/datasets"
+        | "/api/records"
+        | "/api/value"
+        | "/api/rows"
+        | "/api/relations"
+        | "/api/opportunities"
+        | "/api/budgets"
+        | "/api/retention"
+        | "/api/lenses"
+        | "/api/footprint"
+        | "/api/cohort-retention" => {
             let query: QueryRequest = serde_json::from_slice(&request.body)
                 .map_err(|error| diagnostic("explorer.request.json", error.to_string()))?;
+            let allowed = match request.path.as_str() {
+                "/api/datasets" => matches!(query.query, Query::Catalog {}),
+                "/api/records" => matches!(query.query, Query::Records { .. }),
+                "/api/rows" => matches!(query.query, Query::RankedRows { .. }),
+                "/api/relations" => matches!(query.query, Query::Related { .. }),
+                "/api/opportunities" => {
+                    matches!(&query.query, Query::Records { dataset, .. } if dataset == "opportunities")
+                }
+                "/api/budgets" => {
+                    matches!(&query.query, Query::Records { dataset, .. } if dataset == "budgets")
+                }
+                "/api/retention" => matches!(query.query, Query::AnnotatedWhy { .. }),
+                "/api/lenses" => {
+                    matches!(&query.query, Query::Records { dataset, .. } | Query::LensDetail { dataset, .. } if dataset.starts_with("lens_"))
+                }
+                "/api/footprint" => matches!(query.query, Query::FeatureFootprint { .. }),
+                "/api/cohort-retention" => matches!(query.query, Query::CohortRetention { .. }),
+                "/api/value" => matches!(
+                    query.query,
+                    Query::RecordValue { .. }
+                        | Query::IdentityValue { .. }
+                        | Query::SourceValue { .. }
+                        | Query::IncomingEdgeValue { .. }
+                        | Query::IdentityShapeValue { .. }
+                        | Query::SymbolValue { .. }
+                ),
+                _ => true,
+            };
+            if !allowed {
+                return Err(diagnostic(
+                    "explorer.request",
+                    "action does not match this API resource",
+                ));
+            }
             if !valid_id(&query.request_id) {
                 return Err(diagnostic("explorer.request_id", "invalid request ID"));
             }

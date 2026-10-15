@@ -423,6 +423,7 @@ fn source(path: PathBuf, generated_by: Option<&str>) -> Source {
         attributes: vec!["RegisterService".into()],
         generated_by: generated_by.map(str::to_owned),
         sha256: None,
+        annotations: None,
     }
 }
 

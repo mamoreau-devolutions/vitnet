@@ -23,7 +23,7 @@ impl Image {
         self.names.extend_from_slice(raw_name);
         let body = &mut self.bodies[0];
         body.push(0xd0);
-        body.extend_from_slice(&0x0600_0001_u32.to_le_bytes());
+        body.extend_from_slice(&0x0a00_0001_u32.to_le_bytes());
         for value in [bytes, 0, 0, offset] {
             i4(body, value);
         }
@@ -60,10 +60,11 @@ impl Image {
         }
         let metadata = |rvas: &[u32]| {
             let mut tables = vec![0, 0, 0, 0, 2, 0, 0, 1];
-            let valid = (1_u64 << 0) | (1 << 2) | (1 << 4) | (1 << 6) | (1 << 32);
+            let valid =
+                (1_u64 << 0) | (1 << 2) | (1 << 4) | (1 << 6) | (1 << 10) | (1 << 26) | (1 << 32);
             tables.extend_from_slice(&valid.to_le_bytes());
             tables.extend_from_slice(&0_u64.to_le_bytes());
-            for count in [1_u32, 1, 1, 7, 1] {
+            for count in [1_u32, 1, 1, 7, 1, 1, 1] {
                 tables.extend_from_slice(&count.to_le_bytes());
             }
             tables.extend_from_slice(&[0; 10]); // Module
@@ -74,10 +75,14 @@ impl Image {
             tables.extend_from_slice(&[0; 6]); // Field
             for (rva, name) in rvas.iter().zip(&names[..7]) {
                 tables.extend_from_slice(&rva.to_le_bytes());
-                for value in [0_u16, 0, *name, 0, 1] {
+                for value in [0_u16, 0, *name, 1, 1] {
                     tables.extend_from_slice(&value.to_le_bytes());
                 }
             }
+            for value in [10_u16, names[0], 1] {
+                tables.extend_from_slice(&value.to_le_bytes());
+            }
+            tables.extend_from_slice(&0_u16.to_le_bytes()); // Explicitly unsupported ModuleRef owner.
             tables.extend_from_slice(&0_u32.to_le_bytes()); // Assembly hash
             for value in [2_u16, 2, u16::MAX, u16::MAX] {
                 tables.extend_from_slice(&value.to_le_bytes());
@@ -91,22 +96,25 @@ impl Image {
             root.extend_from_slice(&[1, 0, 1, 0, 0, 0, 0, 0]);
             root.extend_from_slice(&12_u32.to_le_bytes());
             root.extend_from_slice(b"v4.0.30319\0\0");
-            root.extend_from_slice(&[0, 0, 3, 0]);
-            let mut offset = 76_u32;
+            root.extend_from_slice(&[0, 0, 4, 0]);
+            let blobs = [0_u8, 3, 0, 0, 1]; // Static void(), used by the data-only stream and MemberRef.
+            let mut offset = 92_u32;
             for (name, data) in [
                 (&b"#~\0\0"[..], &tables[..]),
                 (&b"#Strings\0\0\0\0"[..], &strings[..]),
                 (&b"#US\0"[..], &self.strings[..]),
+                (&b"#Blob\0\0\0"[..], &blobs[..]),
             ] {
                 root.extend_from_slice(&offset.to_le_bytes());
                 root.extend_from_slice(&as_u32(data.len()).to_le_bytes());
                 root.extend_from_slice(name);
                 offset += as_u32(data.len());
             }
-            assert_eq!(root.len(), 76);
+            assert_eq!(root.len(), 92);
             root.extend_from_slice(&tables);
             root.extend_from_slice(&strings);
             root.extend_from_slice(&self.strings);
+            root.extend_from_slice(&blobs);
             root
         };
         let placeholder = metadata(&[0; 7]);

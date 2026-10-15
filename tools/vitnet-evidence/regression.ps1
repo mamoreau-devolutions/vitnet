@@ -1,10 +1,10 @@
-param([switch]$Keep)
+param([switch]$Keep, [string]$ScratchRoot = $PSScriptRoot, [switch]$SourceOnly)
 # Offline data-reader regressions. Only the collector and this synthetic fixture
 # are compiled. The fixture entry point throws and is NEVER invoked.
 $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
 $root = $PSScriptRoot
-$fixture = Join-Path ([IO.Path]::GetTempPath()) ('vitnet-evidence-regression-' + [Guid]::NewGuid().ToString('N'))
+$fixture = Join-Path $ScratchRoot ('vitnet-evidence-regression-' + [Guid]::NewGuid().ToString('N'))
 $utf8 = [Text.UTF8Encoding]::new($false)
 $passed = [Collections.Generic.List[string]]::new()
 $failures = [Collections.Generic.List[string]]::new()
@@ -98,19 +98,207 @@ try {
     Invoke-Build @('build', '--no-restore', '--nologo', '--verbosity', 'quiet')
     $collector = Join-Path $root 'bin/Debug/net10.0/vitnet-evidence.dll'
     $output = Join-Path $fixture 'evidence.json'
+    $sourceTests = Join-Path $fixture 'source-tests'
+    [IO.Directory]::CreateDirectory($sourceTests) | Out-Null
+    Write-Fixture 'source-tests\Annotations.cs' @'
+namespace AnnotationFixture;
+public class MarkAttribute : System.Attribute { }
+[Mark("type")] public class Outer<[Mark("outer generic")] T>([Mark("primary")] int primary)
+{
+    [Mark("ctor")] public Outer([param: Mark("ctor input")] string input) { }
+    [Mark("method"), Other]
+    [return: Mark("result")]
+    public int Transform<[Mark("method generic")] V>([Mark("input"), Other] int @value, [param: Mark("explicit")] string text) => 0;
+    [Mark("index")]
+    [return: Mark("index result")]
+    public int this[[Mark("index input")] int index] => 0;
+    [Mark("nested")] public class Nested<[Mark("nested generic")] U>([Mark("nested primary")] int @value)
+    {
+        [Mark("nested ctor")] public Nested([Mark("nested ctor input")] string text) { }
+        public void Go<[Mark("go generic")] V>([Mark("go input")] int value) { }
+    }
+}
+[Mark("record")] public record Sample<[Mark("record generic")] T>([Mark("record input")] T item, [property: Mark("property target")] int ignored);
+[Mark("delegate")]
+[return: Mark("delegate result")]
+public delegate int Callback<[Mark("delegate generic")] T>([Mark("delegate input")] int value);
+public class Plain { }
+'@
+    Collect @('--output', $output, '--source-root', $sourceTests) | Out-Null
+    $annotationEvidence = Get-Content $output -Raw | ConvertFrom-Json -AsHashtable
+    $annotationSources = $annotationEvidence.sources
+    Assert-Equal $annotationSources.Count 11 'Only original declarations own source records'
+    $outer = @($annotationSources | Where-Object { $_.type_name -ceq 'AnnotationFixture.Outer`1' -and -not $_.ContainsKey('member') })[0]
+    Assert-Equal ($outer.annotations.target -join '|') 'declaration|generic_parameter:T|parameter:primary' 'Type and primary parameter targets'
+    Assert-Equal ($outer.attributes -join '|') 'Mark("type")' 'Legacy type attributes exclude nested targets'
+    Assert-Equal $outer.annotations[1].attributes[0] 'Mark("outer generic")' 'Actual generic attribute syntax'
+    Assert-Equal $outer.annotations[2].attributes[0] 'Mark("primary")' 'Primary constructor attribute syntax'
+    $method = @($annotationSources | Where-Object { $_['member'] -ceq 'Transform(int,string)' })[0]
+    Assert-Equal ($method.attributes -join '|') 'Mark("method")|Other|Mark("result")' 'Legacy method and return attributes unchanged'
+    Assert-Equal ($method.annotations.target -join '|') 'declaration|generic_parameter:V|parameter:text|parameter:value|return' 'Method target names and escaped parameter identifier'
+    Assert-Equal ($method.annotations[0].attributes -join '|') 'Mark("method")|Other' 'Declaration attribute list contents'
+    Assert-Equal ($method.annotations[3].attributes -join '|') 'Mark("input")|Other' 'Multiple parameter attributes retained'
+    Assert-Equal $method.annotations[4].attributes[0] 'Mark("result")' 'Return target distinguished from declaration'
+    Assert-Equal $method.sha256 (Get-FileHash (Join-Path $sourceTests 'Annotations.cs') -Algorithm SHA256).Hash.ToLowerInvariant() 'Original owner source bytes'
+    $definition = @($annotationSources | Where-Object type_name -CEQ 'AnnotationFixture.MarkAttribute')[0]
+    Assert-Equal $definition.attributes.Count 0 'Attribute definition is not an application'
+    Assert-True (-not $definition.ContainsKey('annotations')) 'Unannotated declaration preserves optional absence'
+    Pass 'collector_source_annotation_targets_preserve_declarations_returns_and_legacy_attributes'
+    $ctor = @($annotationSources | Where-Object { $_.type_name -ceq 'AnnotationFixture.Outer`1' -and $_['member'] -ceq '.ctor(string)' })[0]
+    Assert-Equal ($ctor.annotations.target -join '|') 'declaration|parameter:input' 'Constructor parameter target'
+    Assert-Equal $ctor.annotations[1].attributes[0] 'Mark("ctor input")' 'Explicit param target syntax'
+    $indexer = @($annotationSources | Where-Object { $_['member'] -ceq 'this[int]' })[0]
+    Assert-Equal ($indexer.annotations.target -join '|') 'declaration|parameter:index|return' 'Indexer targets'
+    $delegate = @($annotationSources | Where-Object kind -CEQ 'delegate')[0]
+    Assert-Equal ($delegate.annotations.target -join '|') 'declaration|generic_parameter:T|parameter:value|return' 'Delegate targets'
+    Assert-Equal $delegate.annotations[2].attributes[0] 'Mark("delegate input")' 'Delegate input syntax'
+    Assert-Equal $delegate.annotations[3].attributes[0] 'Mark("delegate result")' 'Delegate return syntax'
+    $nested = @($annotationSources | Where-Object { $_.type_name -ceq 'AnnotationFixture.Outer`1+Nested`1' -and -not $_.ContainsKey('member') })[0]
+    Assert-Equal ($nested.annotations.target -join '|') 'declaration|generic_parameter:U|parameter:value' 'Nested type owns only its immediate parameters'
+    Assert-Equal $nested.annotations[1].attributes[0] 'Mark("nested generic")' 'Nested generic syntax'
+    $go = @($annotationSources | Where-Object { $_['member'] -ceq 'Go(int)' })[0]
+    Assert-Equal ($go.annotations.target -join '|') 'generic_parameter:V|parameter:value' 'Nested method parameter attributes are not lost'
+    $record = @($annotationSources | Where-Object kind -CEQ 'record')[0]
+    Assert-Equal ($record.annotations.target -join '|') 'declaration|generic_parameter:T|parameter:item' 'Record primary parameters; property-targeted attribute is not a parameter application'
+    Assert-Equal $record.annotations[2].attributes[0] 'Mark("record input")' 'Record primary input syntax'
+    Pass 'collector_source_annotations_cover_constructor_indexer_delegate_and_nested_primary_parameters'
+    $sourceLimits = Join-Path $fixture 'source-limits'
+    [IO.Directory]::CreateDirectory($sourceLimits) | Out-Null
+    Write-Fixture 'source-limits\Bounded.cs' '[A] class C {}'
+    Collect @('--output', $output, '--source-root', $sourceLimits) | Out-Null
+    $boundedSource = Get-Content $output -Raw | ConvertFrom-Json -AsHashtable
+    # Roslyn visits the declaration, attribute list, attribute and identifier.
+    # The legacy string plus annotation group/string are separately budgeted.
+    $sourceRecords = $boundedSource.provenance.Count + $boundedSource.artifacts.Count +
+        $boundedSource.diagnostics.Count + $boundedSource.sources.Count + 4 + 1 + 1 + 1
+    Collect @('--output', $output, '--source-root', $sourceLimits, '--max-records', $sourceRecords.ToString()) | Out-Null
+    Assert-PreservedFailure @('--source-root', $sourceLimits, '--max-records', ($sourceRecords - 1).ToString()) 4 'resource.collector.records'
+    Pass 'collector_source_annotation_items_are_budgeted_and_fail_atomically'
+
+    $xamlTests = Join-Path $fixture 'xaml-tests'
+    [IO.Directory]::CreateDirectory($xamlTests) | Out-Null
+    Write-Fixture 'xaml-tests\Hint.csproj' '<Project><PropertyGroup><AssemblyName>Synthetic.Views</AssemblyName></PropertyGroup></Project>'
+    Write-Fixture 'xaml-tests\A.xaml' @'
+<ui:Window xmlns:ui="urn:synthetic" xmlns:a="http://schemas.microsoft.com/winfx/2006/xaml" xmlns:fake="urn:fake" a:Class="Views.Shell" Class="NotAClass">
+  <ui:ResourceDictionary Source="Themes/Colors.xaml">
+    <ui:Brush a:Key="zeta"/><ui:Brush a:Key="alpha"/><ui:Brush a:Key="alpha"/>
+    <ui:Brush a:Key="a&amp;b"/><ui:Brush fake:Key="NotAKey"/><ui:Brush Key="NotAKey"/>
+  </ui:ResourceDictionary>
+  <ui:ResourceInclude Source="https://example.invalid/theme.axaml"/>
+  <ui:ResourceDictionary Source="Themes/Colors.xaml"/>
+  <ui:Button Source="NotAnInclude"/>
+</ui:Window>
+'@
+    Write-Fixture 'xaml-tests\B.axaml' @'
+<Styles xmlns="https://github.com/avaloniaui" xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml">
+  <StyleInclude Source="avares://Synthetic/Theme.axaml"/>
+  <MergeResourceInclude Source="../Shared.axaml"/>
+  <MergeStyleInclude Source="./SharedStyles.axaml"/>
+  <Button x:Key="only"/>
+</Styles>
+'@
+    Collect @('--output', $output, '--source-root', $xamlTests) | Out-Null
+    $xamlEvidence = Get-Content $output -Raw | ConvertFrom-Json -AsHashtable
+    Assert-Equal $xamlEvidence.xaml_documents.Count 2 'Both XAML extensions captured'
+    $firstXaml = $xamlEvidence.xaml_documents[0]
+    $secondXaml = $xamlEvidence.xaml_documents[1]
+    Assert-Equal $firstXaml.path (Join-Path $xamlTests 'A.xaml') 'Document deterministic ordinal ordering'
+    Assert-Equal $firstXaml.assembly 'Synthetic.Views' 'Textual project assembly hint'
+    Assert-Equal $firstXaml.declared_class 'Views.Shell' 'Namespace-qualified Class only'
+    Assert-Equal $firstXaml.root_element '{urn:synthetic}Window' 'Expanded root XML name'
+    Assert-Equal ($firstXaml.keys -join '|') 'a&b|alpha|zeta' 'Sorted distinct namespace-qualified keys'
+    Assert-Equal ($firstXaml.includes -join '|') 'Themes/Colors.xaml|https://example.invalid/theme.axaml' 'Raw sorted includes without fetching or resolving'
+    Assert-Equal $secondXaml.root_element '{https://github.com/avaloniaui}Styles' 'Default root namespace preserved'
+    Assert-True (-not $secondXaml.ContainsKey('declared_class')) 'Missing declared class stays absent'
+    Assert-Equal ($secondXaml.includes -join '|') '../Shared.axaml|./SharedStyles.axaml|avares://Synthetic/Theme.axaml' 'Avalonia include forms remain literal'
+    Assert-Equal ($secondXaml.keys -join '|') 'only' 'AXAML key'
+    foreach ($document in $xamlEvidence.xaml_documents) {
+        Assert-Equal $document.sha256 (Get-FileHash $document.path -Algorithm SHA256).Hash.ToLowerInvariant() 'Actual XAML source bytes'
+        Assert-Equal @($xamlEvidence.artifacts | Where-Object { $_.kind -ceq 'source' -and $_.path -ceq $document.path }).Count 1 'Source artifact provenance'
+        Assert-Equal $xamlEvidence.provenance["source.xaml_assembly_basis:$($document.path)"] 'textual_project_directory_hint; syntax-only association, not compiled ownership' 'Explicit syntax-only association'
+    }
+    Assert-True ($xamlEvidence.provenance['source.xaml_basis'].Contains('includes are never fetched or resolved')) 'XAML limitations are explicit'
+    Assert-Equal $xamlEvidence.sources.Count 0 'XAML documents must not create fake source owners'
+    $deterministicHash = (Get-FileHash $output -Algorithm SHA256).Hash
+    Collect @('--output', $output, '--source-root', $xamlTests) | Out-Null
+    Assert-Equal (Get-FileHash $output -Algorithm SHA256).Hash $deterministicHash 'Identical XAML collection is byte deterministic'
+    Pass 'collector_xaml_documents_capture_classes_keys_includes_hashes_and_syntax_only_hints'
+    Write-Fixture 'xaml-tests\Other.csproj' '<Project><PropertyGroup><AssemblyName>Other.Views</AssemblyName></PropertyGroup></Project>'
+    Collect @('--output', $output, '--source-root', $xamlTests) | Out-Null
+    $ambiguousXaml = Get-Content $output -Raw | ConvertFrom-Json -AsHashtable
+    Assert-Equal @($ambiguousXaml.xaml_documents | Where-Object assembly -NE '').Count 0 'Ambiguous projects must not fabricate a XAML assembly'
+    Assert-Equal @($ambiguousXaml.diagnostics | Where-Object code -CEQ 'source.xaml_assembly_unknown').Count 2 'Unknown XAML associations diagnosed'
+    Pass 'collector_xaml_ambiguous_textual_projects_preserve_unknown_associations'
+
+    $xamlLimits = Join-Path $fixture 'xaml-limits'
+    [IO.Directory]::CreateDirectory($xamlLimits) | Out-Null
+    $boundedXaml = '<Root xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml" x:Key="k" padding="' + ('a' * 256) + '"/>'
+    Write-Fixture 'xaml-limits\Bounded.xaml' $boundedXaml
+    $xamlBytes = [IO.FileInfo]::new((Join-Path $xamlLimits 'Bounded.xaml')).Length
+    Collect @('--output', $output, '--source-root', $xamlLimits, '--max-file-bytes', $xamlBytes.ToString(),
+        '--max-total-bytes', $xamlBytes.ToString(), '--max-files', '1') | Out-Null
+    $boundedEvidence = Get-Content $output -Raw | ConvertFrom-Json -AsHashtable
+    Assert-Equal $boundedEvidence.xaml_documents[0].root_element 'Root' 'Unqualified root name'
+    Assert-Equal $boundedEvidence.xaml_documents[0].assembly '' 'No project association invented'
+    Assert-Equal $boundedEvidence.xaml_documents[0].includes.Count 0 'Empty include inventory remains nonnull'
+    # One XML element, three attributes and one captured key are charged in
+    # addition to each published artifact/document/diagnostic/provenance item.
+    $xamlRecords = $boundedEvidence.provenance.Count + $boundedEvidence.artifacts.Count +
+        $boundedEvidence.diagnostics.Count + $boundedEvidence.xaml_documents.Count + 1 + 3 + 1
+    Collect @('--output', $output, '--source-root', $xamlLimits, '--max-records', $xamlRecords.ToString()) | Out-Null
+    Assert-PreservedFailure @('--source-root', $xamlLimits, '--max-records', ($xamlRecords - 1).ToString()) 4 'resource.collector.records'
+    Assert-PreservedFailure @('--source-root', $xamlLimits, '--max-file-bytes', ($xamlBytes - 1).ToString()) 4 'resource.collector.files'
+    Assert-PreservedFailure @('--source-root', $xamlLimits, '--max-total-bytes', ($xamlBytes - 1).ToString()) 4 'resource.collector.files'
+    Write-Fixture 'xaml-limits\Second.axaml' '<Styles/>'
+    Assert-PreservedFailure @('--source-root', $xamlLimits, '--max-files', '1') 4 'resource.collector.directory'
+    Collect @('--output', $output, '--source-root', $xamlLimits, '--max-files', '2') | Out-Null
+    Assert-Equal (Get-Content $output -Raw | ConvertFrom-Json -AsHashtable).xaml_documents.Count 2 'Exact XAML file-count boundary'
+    Pass 'collector_xaml_byte_file_and_record_limits_are_exact_and_atomic'
+    Remove-Item -LiteralPath (Join-Path $xamlLimits 'Second.axaml')
+    foreach ($badXaml in @(
+        '<!DOCTYPE Root [<!ENTITY injected "expanded">]><Root>&injected;</Root>',
+        '<!DOCTYPE Root SYSTEM "file:///not-read-or-resolved.dtd"><Root/>',
+        '<Root><Child></Root>',
+        '',
+        '<Root/><Other/>'
+    )) {
+        Write-Fixture 'xaml-limits\Bounded.xaml' $badXaml
+        Assert-PreservedFailure @('--source-root', $xamlLimits) 2 'source.xaml_malformed'
+    }
+    Write-Fixture 'xaml-limits\Bounded.xaml' ('<Root>' + ('<Child>' * 65) + ('</Child>' * 65) + '</Root>')
+    Assert-PreservedFailure @('--source-root', $xamlLimits) 4 'resource.collector.xaml_depth'
+    Pass 'collector_xaml_dtd_malformed_xml_and_depth_fail_typed_without_publication'
+    Collect @('--output', $output) | Out-Null
+    Assert-Equal (Get-Content $output -Raw | ConvertFrom-Json -AsHashtable).xaml_documents.Count 0 'No source root produces nonnull empty XAML inventory'
+    Pass 'collector_xaml_capture_requires_an_explicit_source_root'
+    if ($SourceOnly) {
+        if ($failures.Count -ne 0) { throw "Collector source regression FAILED:`n$($failures -join "`n")" }
+        Write-Host "Collector source regression succeeded: $($passed.Count) groups; no source project was compiled or executed."
+        return
+    }
+    # Parse-only attribute fixtures are deliberately not compilable applications.
+    foreach ($directory in @($sourceTests, $sourceLimits, $xamlTests, $xamlLimits)) {
+        Remove-Item -LiteralPath $directory -Recurse -Force
+    }
     $project = Join-Path $fixture 'Fixture.csproj'
     [IO.Directory]::CreateDirectory((Join-Path $fixture 'empty-feed')) | Out-Null
     [IO.Directory]::CreateDirectory((Join-Path $fixture 'generated')) | Out-Null
+    $conventionalRoot = Join-Path $fixture 'captured'
+    $conventionalFile = Join-Path $conventionalRoot 'System.Text.Json.SourceGeneration\SyntheticEmitter\Widget.g.cs'
+    [IO.Directory]::CreateDirectory([IO.Path]::GetDirectoryName($conventionalFile)) | Out-Null
     Write-Fixture 'Fixture.csproj' @'
 <Project Sdk="Microsoft.NET.Sdk">
   <PropertyGroup>
     <OutputType>Exe</OutputType><TargetFramework>net10.0</TargetFramework>
     <AssemblyName>EvidenceFixture</AssemblyName><DebugType>portable</DebugType>
+    <EmitCompilerGeneratedFiles>true</EmitCompilerGeneratedFiles>
+    <CompilerGeneratedFilesOutputPath>$(MSBuildProjectDirectory)\captured</CompilerGeneratedFilesOutputPath>
     <SourceRevisionId>synthetic-revision</SourceRevisionId>
   </PropertyGroup>
   <ItemGroup>
     <EmbeddedResource Include="assets.bin" LogicalName="!AvaloniaResources" />
     <EmbeddedResource Include="values.resources" LogicalName="Fixture.values.resources" />
+    <Analyzer Include="$(MSBuildProjectDirectory)\duplicate\AnalyzerAlias.dll" Condition="'$(EnableDuplicateAnalyzer)' == 'true'" />
   </ItemGroup>
   <PropertyGroup><SourceRevisionId>synthetic-middle-revision</SourceRevisionId></PropertyGroup>
   <PropertyGroup><SourceRevisionId>synthetic-late-revision</SourceRevisionId></PropertyGroup>
@@ -127,14 +315,27 @@ try {
 '@
     Write-Fixture 'Declarations.cs' @'
 namespace Fixture;
-public partial class Widget<T> { public int Value { get; set; } public void Run() { Value++; } public class Nested { } }
+[System.Obsolete("synthetic attribute")] public partial class Widget<T> { public int Value { get; set; } public void Run() { Value++; } public class Nested { } }
 public enum Choice { One, Two }
 public struct Point { public int X; }
 public class Entry { public static void Main() => throw new System.Exception("MUST NEVER EXECUTE"); }
 '@
     Write-Fixture 'Partial.cs' 'namespace Fixture; public partial class Widget<T> { public string Name = ""; }'
+    Write-Fixture 'Shell.xaml' '<Window xmlns="urn:synthetic" xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml" x:Class="Fixture.Widget"/>'
     Write-Fixture 'generated/Output.g.cs' 'namespace Fixture; public class GeneratedThing { public string Text => "generated"; }'
     Write-Fixture 'generated/vitnet.generator.json' '{"schema":"vitnet.generator.v1","name":"FixtureEmitter","version":"1.2.3","input_symbols":["Fixture.Widget`1"]}'
+    $capturedText = @'
+namespace Fixture;
+public partial class Widget<T>
+{
+    public int GeneratedValue() { return 42; }
+#line 2 "Declarations.cs"
+    public int AnchoredValue() { return 7; }
+#line default
+}
+'@
+    Write-Fixture 'captured\System.Text.Json.SourceGeneration\SyntheticEmitter\Widget.g.cs' (
+        $capturedText.Replace('"Declarations.cs"', ('"' + (Join-Path $fixture 'Declarations.cs') + '"')))
     $valuesPath = Join-Path $fixture 'values.resources'
     $writer = [Resources.ResourceWriter]::new($valuesPath)
     try {
@@ -158,6 +359,10 @@ public class Entry { public static void Main() => throw new System.Exception("MU
     Collect (@('--output', $output) + $argsAll) | Out-Null
     $evidence = Get-Content $output -Raw | ConvertFrom-Json -AsHashtable
     Assert-Equal $evidence.schema 'vitnet.evidence.v1' 'Evidence schema'
+    Assert-Equal $evidence.xaml_documents.Count 1 'Recorded compiler project route XAML document'
+    Assert-Equal $evidence.xaml_documents[0].assembly 'EvidenceFixture' 'Recorded compiler assembly remains a syntax-only XAML hint'
+    Assert-Equal $evidence.provenance["source.xaml_assembly_basis:$(Join-Path $fixture 'Shell.xaml')"] 'recorded_compiler_project_directory_hint; syntax-only association, not compiled ownership' 'Compiler route association basis'
+    Pass 'collector_xaml_recorded_compiler_project_routes_remain_syntax_only_hints'
     $nested = @($evidence.assemblies[0].types | Where-Object name -CEQ 'Fixture.Widget`1+Nested')
     Assert-Equal $nested.Count 1 'Nested generic metadata identity'
     Assert-Equal $nested[0].kind 'reference' 'Nested generic kind'
@@ -204,6 +409,88 @@ public class Entry { public static void Main() => throw new System.Exception("MU
     $reference = @($evidence.mappings | Where-Object { $_.basis -eq 'binlog_csc_reference' -and $_.assembly -eq 'System.Runtime' })[0]
     $referencePath = $reference.identity
     Pass 'collector_exact_source_generator_pdb_and_resource_provenance'
+    $suppliedRun = @($evidence.generator_runs | Where-Object name -CEQ 'FixtureEmitter')[0]
+    Assert-Equal $suppliedRun.status 'output_captured' 'Supplied emitter capture status'
+    Assert-Equal $suppliedRun.execution_status 'not_observed' 'Supplied mapping is not execution'
+    $suppliedLink = @($evidence.generator_links | Where-Object rule -eq 'manifest_input_symbol')[0]
+    Assert-Equal $suppliedLink.trigger_symbol 'Fixture.Widget`1' 'Exact supplied trigger'
+    Assert-Equal $suppliedLink.evidence_tier 'supplied' 'Supplied is not independently observed'
+    Assert-True (-not $suppliedLink.ContainsKey('trigger_source')) 'Unresolved input symbol must not invent a source'
+    $capturedRun = @($evidence.generator_runs | Where-Object name -CEQ 'SyntheticEmitter')[0]
+    Assert-Equal $capturedRun.basis 'conventional_output_directory' 'Directory emitter candidate basis'
+    Assert-Equal $capturedRun.status 'output_captured' 'Conventional capture status'
+    Assert-Equal $capturedRun.execution_status 'not_observed' 'Stale directory must not establish execution'
+    Assert-Equal $capturedRun.project_path $project 'Exact compiler project route'
+    Assert-Equal $capturedRun.target_assembly 'EvidenceFixture' 'Exact compiler assembly'
+    Assert-Equal $capturedRun.configuration 'Debug' 'Exact recorded configuration'
+    Assert-Equal $capturedRun.target_framework 'net10.0' 'Exact recorded framework'
+    Assert-True ($capturedRun.version.Length -gt 0) 'Uniquely referenced analyzer metadata version unavailable'
+    Assert-Equal $capturedRun.outputs[0].path $conventionalFile 'Actual captured file path'
+    Assert-Equal $capturedRun.outputs[0].sha256 (Get-FileHash $conventionalFile -Algorithm SHA256).Hash.ToLowerInvariant() 'Actual output digest'
+    Assert-Equal $capturedRun.outputs[0].build_match 'matched' 'Matching PE/PDB output checksum'
+    Assert-True (@($capturedRun.outputs[0].pdb_checksums | Where-Object { $_.status -eq 'matched' -and $_.assembly_match -eq 'pe_identity_verified' }).Count -gt 0) 'No verified checksum details'
+    Assert-True (@($evidence.generator_runs | Where-Object status -eq 'analyzer_referenced').Count -gt 0) 'Analyzer inputs not distinguished'
+    Assert-Equal @($evidence.generator_runs | Where-Object execution_status -ne 'not_observed').Count 0 'Fabricated generator execution'
+    $partialLinks = @($evidence.generator_links | Where-Object rule -eq 'attributed_partial_declaration')
+    Assert-True ($partialLinks.Count -gt 0) 'Attributed partial declaration candidate missing'
+    Assert-Equal $partialLinks[0].evidence_tier 'candidate' 'Attribute syntax must remain candidate'
+    Assert-Equal $partialLinks[0].trigger_source $source 'Candidate physical input'
+    Assert-Equal $partialLinks[0].trigger_type 'Fixture.Widget`1' 'Candidate textual type'
+    Assert-True (@($evidence.generator_links | Where-Object { $_.rule -eq 'line_directive' -and $_.evidence_tier -eq 'candidate' -and $_.trigger_source -eq $source }).Count -gt 0) '#line candidate missing'
+    Pass 'collector_generated_capture_separates_supplied_candidates_checksums_and_execution'
+    Collect @('--output', $output, '--generated-root', $conventionalRoot) | Out-Null
+    $unrouted = Get-Content $output -Raw | ConvertFrom-Json -AsHashtable
+    Assert-Equal $unrouted.generator_runs.Count 1 'Conventional output without binlog still captured'
+    Assert-True (-not $unrouted.generator_runs[0].ContainsKey('version')) 'Version invented without analyzer inputs'
+    Assert-True (-not $unrouted.generator_runs[0].ContainsKey('project_path')) 'Project invented without recorded route'
+    Assert-Equal $unrouted.generator_runs[0].outputs[0].build_match 'unknown' 'Directory alone must not match a build'
+    Assert-Equal $unrouted.generator_links.Count 0 'Unavailable triggers must not fabricate attribution'
+    Pass 'collector_conventional_capture_preserves_unknown_version_build_and_trigger_inputs'
+    $noOutput = Join-Path $fixture 'no-output'
+    [IO.Directory]::CreateDirectory($noOutput) | Out-Null
+    Write-Fixture 'no-output\vitnet.generator.json' '{"schema":"vitnet.generator.v1","name":"NoOutputEmitter","input_symbols":["Fixture.Unknown"]}'
+    Collect @('--output', $output, '--generated-root', $noOutput) | Out-Null
+    $absent = Get-Content $output -Raw | ConvertFrom-Json -AsHashtable
+    Assert-Equal $absent.generator_runs[0].status 'output_unavailable' 'Missing output not reported captured'
+    Assert-True (-not $absent.generator_runs[0].ContainsKey('version')) 'Missing supplied version not explicit'
+    Assert-Equal $absent.generator_runs[0].outputs.Count 0 'Missing output fabricated'
+    Assert-Equal $absent.generator_links.Count 0 'No output-to-input link without output'
+    Assert-Equal $absent.generators[0].version '' 'Legacy field shape retained for unknown version'
+    Pass 'collector_missing_manifest_version_and_output_are_explicit_unknowns'
+    [IO.File]::AppendAllText($conventionalFile, "`n// changed after compiler snapshot", $utf8)
+    Collect (@('--output', $output) + $argsAll) | Out-Null
+    $generatedDrift = Get-Content $output -Raw | ConvertFrom-Json -AsHashtable
+    $driftRun = @($generatedDrift.generator_runs | Where-Object name -CEQ 'SyntheticEmitter')[0]
+    Assert-Equal $driftRun.outputs[0].build_match 'drift' 'Changed output must not match portable PDB'
+    Assert-Equal $driftRun.outputs[0].sha256 (Get-FileHash $conventionalFile -Algorithm SHA256).Hash.ToLowerInvariant() 'Drift retains current output bytes'
+    Assert-Equal $driftRun.execution_status 'not_observed' 'Drift must not fabricate execution'
+    Pass 'collector_generated_output_checksum_drift_remains_snapshot_evidence'
+    [IO.File]::WriteAllText($conventionalFile, ([IO.File]::ReadAllText($conventionalFile) -replace "`n// changed after compiler snapshot$", ''), $utf8)
+    [IO.Directory]::CreateDirectory((Join-Path $fixture 'duplicate')) | Out-Null
+    [IO.File]::WriteAllBytes((Join-Path $fixture 'duplicate\AnalyzerAlias.dll'), [IO.File]::ReadAllBytes($capturedRun.assembly_path))
+    Write-Fixture 'two-builds.proj' @'
+<Project>
+  <Target Name="Build">
+    <MSBuild Projects="Fixture.csproj" Targets="Rebuild" Properties="Configuration=Debug" />
+    <MSBuild Projects="Fixture.csproj" Targets="Rebuild" Properties="Configuration=Release;EnableDuplicateAnalyzer=true" />
+  </Target>
+</Project>
+'@
+    Invoke-Build @('msbuild', (Join-Path $fixture 'two-builds.proj'), '-nologo', '-verbosity:quiet', "-bl:$fixture\two-builds.binlog;ProjectImports=None")
+    Collect @('--output', $output, '--binlog', (Join-Path $fixture 'two-builds.binlog'),
+        '--generated-root', $conventionalRoot, '--assembly', $assembly,
+        '--assembly', (Join-Path $fixture 'bin\Release\net10.0\EvidenceFixture.dll')) | Out-Null
+    $ambiguous = Get-Content $output -Raw | ConvertFrom-Json -AsHashtable
+    $ambiguousRun = @($ambiguous.generator_runs | Where-Object name -CEQ 'SyntheticEmitter')[0]
+    Assert-True (-not $ambiguousRun.ContainsKey('assembly_path')) 'Ambiguous analyzer path must remain unknown'
+    Assert-True (-not $ambiguousRun.ContainsKey('version')) 'Ambiguous analyzer version must remain unknown'
+    Assert-True (-not $ambiguousRun.ContainsKey('configuration')) 'Multiple build configurations must remain unknown'
+    Assert-Equal $ambiguousRun.outputs[0].build_match 'ambiguous' 'Multiple PE/PDB builds must not choose one'
+    Assert-Equal @($ambiguous.diagnostics | Where-Object code -eq 'generated.analyzer_ambiguous').Count 1 'Analyzer ambiguity diagnosis'
+    Assert-Equal @($ambiguous.diagnostics | Where-Object code -eq 'generated.project_ambiguous').Count 1 'Project route ambiguity diagnosis'
+    Assert-Equal $ambiguousRun.execution_status 'not_observed' 'Ambiguous routes still not execution'
+    Pass 'collector_generated_analyzer_and_build_route_ambiguity_is_not_guessed'
+    Build-Fixture
     $revisionFacts = @($evidence.provenance.GetEnumerator() | Where-Object {
         $_.Key.StartsWith('binlog.property:') -and $_.Key.EndsWith(':SourceRevisionId')
     })

@@ -2,16 +2,20 @@
 
 mod comparison;
 pub mod model;
+mod opportunities;
 mod reports;
 mod retention;
 mod shapes;
 mod store;
 
 pub use comparison::*;
+pub use opportunities::*;
+mod symbols;
 pub use reports::*;
 pub use retention::*;
 pub use shapes::*;
 pub use store::*;
+pub use symbols::{SYMBOL_SCHEMA, SymbolLookup, SymbolSidecar};
 
 use std::path::Path;
 use thiserror::Error;
@@ -36,3 +40,4 @@ pub(crate) fn io(path: &Path, cause: impl std::fmt::Display) -> AttributionError
         diagnostic: Box::new(diagnostic),
     }
 }
+pub mod lenses;

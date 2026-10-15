@@ -10,6 +10,8 @@ pub struct RetentionAnchor {
     pub producer_label: String,
     pub sources: SourceMatch,
     pub possible_mechanisms: Vec<String>,
+    pub total_source_candidates: usize,
+    pub source_preview_truncated: bool,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -30,7 +32,7 @@ pub struct RetentionReport {
 }
 
 fn anchor(matcher: &Matcher<'_>, id: u64, label: &str, truncated: bool) -> RetentionAnchor {
-    let sources = if truncated {
+    let mut sources = if truncated {
         SourceMatch {
             status: "unmapped_truncated_label".into(),
             basis: "A bounded preview cannot establish a complete symbol association".into(),
@@ -57,11 +59,30 @@ fn anchor(matcher: &Matcher<'_>, id: u64, label: &str, truncated: bool) -> Reten
             mechanisms.insert("generated_code");
         }
     }
+    let total_source_candidates = sources.sources.len();
+    let mut source_preview_truncated = total_source_candidates > 8;
+    sources.sources.truncate(8);
+    for source in &mut sources.sources {
+        source_preview_truncated |= source.attributes.len() > 12;
+        source.attributes.truncate(12);
+        for attribute in &mut source.attributes {
+            if attribute.len() > 256 {
+                let mut end = 256;
+                while !attribute.is_char_boundary(end) {
+                    end -= 1;
+                }
+                attribute.truncate(end);
+                source_preview_truncated = true;
+            }
+        }
+    }
     RetentionAnchor {
         node_id: id,
         producer_label: label.into(),
         sources,
         possible_mechanisms: mechanisms.into_iter().map(str::to_owned).collect(),
+        total_source_candidates,
+        source_preview_truncated,
     }
 }
 
@@ -131,7 +152,17 @@ pub fn explain(
         .map_err(|cause| AttributionError {
             diagnostic: cause.diagnostic,
         })?;
-    let matcher = Matcher::new(&index.evidence);
+    Ok(annotate_retention(&index.evidence, witness, incoming))
+}
+
+/// Adds source/annotation candidates without discarding original graph evidence.
+#[must_use]
+pub fn annotate_retention(
+    evidence: &crate::model::Evidence,
+    witness: WhyReport,
+    incoming: IncomingReport,
+) -> RetentionReport {
+    let matcher = Matcher::new(evidence);
     let annotated_paths = witness
         .paths
         .iter()
@@ -159,7 +190,7 @@ pub fn explain(
         .filter_map(|edge| edge.source.as_ref())
         .map(|node| anchor(&matcher, node.node_id, &node.label, node.truncated))
         .collect();
-    Ok(RetentionReport {
+    RetentionReport {
         schema: "vitnet.attribution-retention.v1".into(), witness,
         alternative_incoming: incoming, annotated_paths, incoming_anchors,
         caveats: vec![
@@ -167,6 +198,7 @@ pub fn explain(
             "Annotations are source/name candidates, not proof that one registration is the sole retainer. Full original paths and reasons are preserved.".into(),
             "Primary/Secondary dependencies may be conjunctive. Paged incoming alternatives and bounded shortest witnesses are not all removal prerequisites.".into(),
             "Witness and incoming queries each expose their own limits and completeness; neither predicts reclaimed bytes.".into(),
+            "Source anchors retain at most 8 declaration previews and 12 attributes of 256 bytes per declaration. Preview truncation/counts are explicit; complete declarations remain in captured source catalogs.".into(),
         ],
-    })
+    }
 }

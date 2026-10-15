@@ -62,7 +62,182 @@ pub struct BatchReport {
     pub elapsed_ms: u64,
 }
 
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct EdgePage {
+    pub generation: String,
+    pub entries: Vec<IncomingEdge>,
+    pub total: u64,
+    pub next_after_edge: Option<u64>,
+    pub scanned: u64,
+    pub stop_reason: String,
+}
+
 impl GraphSession {
+    /// Reads a complete stored edge by its global cache ordinal, including its reason.
+    ///
+    /// # Errors
+    ///
+    /// Rejects absent ordinals, cancellation and corrupt CSR ranges.
+    pub fn edge_record(&mut self, ordinal: u64) -> Result<IncomingEdge, DgmlError> {
+        self.edge_record_preview(ordinal, 1024 * 1024)
+    }
+
+    fn edge_record_preview(
+        &mut self,
+        ordinal: u64,
+        preview: usize,
+    ) -> Result<IncomingEdge, DgmlError> {
+        if self.control.is_cancelled() {
+            return Err(resource_error("resource.cancelled", "edge query cancelled"));
+        }
+        if ordinal >= self.manifest.edge_count {
+            return Err(malformed_simple(
+                "dgml.query.cursor",
+                "edge ordinal outside this graph",
+            ));
+        }
+        let max = self.manifest.max_node_id.ok_or_else(|| {
+            malformed_simple("dgml.cache.structure", "edge cache has no node slots")
+        })?;
+        let (mut low, mut high) = (0, max + 1);
+        while low < high {
+            let middle = low + (high - low) / 2;
+            if self.incoming_range(middle)?.end <= ordinal {
+                low = middle + 1;
+            } else {
+                high = middle;
+            }
+        }
+        if low > max || !self.incoming_range(low)?.contains(&ordinal) {
+            return Err(malformed_simple(
+                "dgml.cache.structure",
+                "edge is outside CSR ranges",
+            ));
+        }
+        let edge = self.edge(ordinal)?;
+        let raw = read_text(
+            &mut self.reasons,
+            edge.reason_offset,
+            u64::from(edge.reason_length),
+            self.reason_bytes,
+        )?;
+        let (reason, reason_truncated) = text_preview(&raw, preview)?;
+        Ok(IncomingEdge {
+            ordinal,
+            source_id: edge.source,
+            source: None,
+            target_id: low,
+            reason,
+            reason_bytes: u64::from(edge.reason_length),
+            reason_truncated,
+        })
+    }
+
+    /// Maps a target-local incoming-edge ordinal to the complete stored edge.
+    ///
+    /// # Errors
+    ///
+    /// Rejects absent targets, ordinals and corrupt records.
+    pub fn incoming_edge_record(
+        &mut self,
+        id: u64,
+        ordinal: u64,
+    ) -> Result<IncomingEdge, DgmlError> {
+        self.node_record(id)?;
+        let range = self.incoming_range(id)?;
+        if ordinal >= range.end - range.start {
+            return Err(malformed_simple(
+                "dgml.query.cursor",
+                "incoming edge cursor outside node",
+            ));
+        }
+        self.edge_record(range.start + ordinal)
+    }
+
+    /// Enumerates all stored edges in CSR order without retaining the graph.
+    ///
+    /// # Errors
+    ///
+    /// Rejects invalid generation, cursors, budgets and corrupt records.
+    pub fn browse_edges(&mut self, options: &IncomingOptions) -> Result<EdgePage, DgmlError> {
+        self.search_edges("", options, 100_000)
+    }
+
+    /// Searches complete reasons and numeric edge IDs in bounded CSR-ordinal batches.
+    ///
+    /// # Errors
+    ///
+    /// Rejects invalid generation, cursors, search budgets and corrupt records.
+    pub fn search_edges(
+        &mut self,
+        contains: &str,
+        options: &IncomingOptions,
+        max_scanned: u64,
+    ) -> Result<EdgePage, DgmlError> {
+        self.check_generation(options.generation.as_deref())?;
+        check_projection(options.limit, options.preview_bytes, self.memory_limit)?;
+        if options.timeout_ms == 0
+            || max_scanned == 0
+            || contains.len() > 1024
+            || options
+                .after_edge
+                .is_some_and(|after| after >= self.manifest.edge_count)
+        {
+            return Err(malformed_simple(
+                "dgml.query.cursor",
+                "invalid edge cursor or deadline",
+            ));
+        }
+        let started = Instant::now();
+        let mut result = EdgePage {
+            generation: self.generation.clone(),
+            entries: Vec::new(),
+            total: self.manifest.edge_count,
+            next_after_edge: options.after_edge,
+            scanned: 0,
+            stop_reason: "complete".into(),
+        };
+        for ordinal in options.after_edge.map_or(0, |n| n + 1)..self.manifest.edge_count {
+            if self.control.is_cancelled() {
+                result.stop_reason = "cancelled".into();
+                break;
+            }
+            if started.elapsed() >= Duration::from_millis(options.timeout_ms) {
+                result.stop_reason = "timeout".into();
+                break;
+            }
+            if result.scanned >= max_scanned {
+                result.stop_reason = "max_scanned".into();
+                break;
+            }
+            let mut edge = self.edge_record(ordinal)?;
+            result.scanned += 1;
+            result.next_after_edge = Some(ordinal);
+            if !contains.is_empty()
+                && !edge.reason.contains(contains)
+                && !edge.source_id.to_string().contains(contains)
+                && !edge.target_id.to_string().contains(contains)
+                && !ordinal.to_string().contains(contains)
+            {
+                continue;
+            }
+            let (reason, truncated) = text_preview(edge.reason.as_bytes(), options.preview_bytes)?;
+            edge.reason = reason;
+            edge.reason_truncated = truncated;
+            result.entries.push(edge);
+            if result.entries.len() == options.limit {
+                if ordinal + 1 < self.manifest.edge_count {
+                    result.stop_reason = "limit".into();
+                }
+                break;
+            }
+        }
+        if result.stop_reason == "complete" {
+            result.next_after_edge = None;
+        }
+        Ok(result)
+    }
+
     /// Pages immediate incoming edges, including parallel edges and unresolved sources.
     ///
     /// # Errors
